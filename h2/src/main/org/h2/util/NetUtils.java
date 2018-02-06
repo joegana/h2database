@@ -13,6 +13,9 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.UnknownHostException;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.util.Enumeration;
 import java.util.concurrent.TimeUnit;
 
 import org.h2.api.ErrorCode;
@@ -249,12 +252,13 @@ public class NetUtils {
         }
         if (useLocalhost) {
             try {
-                bind = InetAddress.getLocalHost();
-            } catch (UnknownHostException e) {
-                throw DbException.convert(e);
+                bind = getLocalAddress2();
+            } catch (UnknownHostException | SocketException  e) {
+               // ignore 
             }
         }
-        String address;
+		
+        String address = null;
         if (bind == null) {
             address = "localhost";
         } else {
@@ -290,6 +294,70 @@ public class NetUtils {
         } catch (Exception e) {
             return "unknown";
         }
+    }
+	
+	 /**
+     * 
+     *  get local ip address
+     * @throws SocketException
+     */
+    public static InetAddress getLocalAddress2() throws UnknownHostException, SocketException {
+        if (isWindowsOS()) {
+            return InetAddress.getLocalHost();
+        } else {
+            return getLinuxLocalIp();
+        }
+    }
+
+    /**
+     * check if it is Windows system
+     *
+     * @return
+     */
+    public static boolean isWindowsOS() {
+        boolean isWindowsOS = false;
+        String osName = System.getProperty("os.name");
+        if (osName.toLowerCase().indexOf("windows") > -1) {
+            isWindowsOS = true;
+        }
+        return isWindowsOS;
+    }
+
+    /**
+     * get local host name
+     */
+    public static String getLocalHostName() throws UnknownHostException {
+        return InetAddress.getLocalHost().getHostName();
+    }
+
+    /**
+     *  get linux host IP address 
+     *
+     * @return IP 
+     * @throws SocketException
+     */
+    private static InetAddress getLinuxLocalIp() throws SocketException {
+        InetAddress ip = null;
+        try {
+            for (Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces(); en.hasMoreElements();) {
+                NetworkInterface intf = en.nextElement();
+                String name = intf.getName();
+                if (!name.contains("docker") && !name.contains("lo")) {
+                    for (Enumeration<InetAddress> enumIpAddr = intf.getInetAddresses(); enumIpAddr.hasMoreElements();) {
+                        InetAddress inetAddress = enumIpAddr.nextElement();
+                        if (!inetAddress.isLoopbackAddress()) {
+                            String ipaddress = inetAddress.getHostAddress().toString();
+                            if (!ipaddress.contains("::") && !ipaddress.contains("0:0:") && !ipaddress.contains("fe80")) {
+                                ip = inetAddress;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (SocketException ex) {
+			ex.printStackTrace();
+        }
+        return ip;
     }
 
 }
