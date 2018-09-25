@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.index;
 
-import java.util.HashSet;
+import java.util.ArrayList;
 import org.h2.api.ErrorCode;
+import org.h2.command.dml.AllColumnsForPlan;
 import org.h2.engine.Constants;
 import org.h2.engine.DbObject;
-import org.h2.engine.Mode;
 import org.h2.engine.Session;
 import org.h2.message.DbException;
 import org.h2.message.Trace;
@@ -21,9 +21,9 @@ import org.h2.table.Column;
 import org.h2.table.IndexColumn;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
-import org.h2.util.MathUtils;
 import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
+import org.h2.value.DataType;
 import org.h2.value.Value;
 import org.h2.value.ValueNull;
 
@@ -35,9 +35,8 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     protected IndexColumn[] indexColumns;
     protected Column[] columns;
     protected int[] columnIds;
-    protected Table table;
-    protected IndexType indexType;
-    protected boolean isMultiVersion;
+    protected final Table table;
+    protected final IndexType indexType;
 
     /**
      * Initialize the base index.
@@ -49,9 +48,9 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
      *            not yet known
      * @param newIndexType the index type
      */
-    protected void initBaseIndex(Table newTable, int id, String name,
+    protected BaseIndex(Table newTable, int id, String name,
             IndexColumn[] newIndexColumns, IndexType newIndexType) {
-        initSchemaObjectBase(newTable.getSchema(), id, name, Trace.INDEX);
+        super(newTable.getSchema(), id, name, Trace.INDEX);
         this.indexType = newIndexType;
         this.table = newTable;
         if (newIndexColumns != null) {
@@ -74,8 +73,7 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
      */
     protected static void checkIndexColumnTypes(IndexColumn[] columns) {
         for (IndexColumn c : columns) {
-            int type = c.column.getType();
-            if (type == Value.CLOB || type == Value.BLOB) {
+            if (DataType.isLargeObject(c.column.getType())) {
                 throw DbException.getUnsupportedException(
                         "Index on BLOB or CLOB column: " + c.column.getCreateSQL());
             }
@@ -122,6 +120,10 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
         return false;
     }
 
+    @Override
+    public boolean isFindUsingFullTableScan() {
+        return false;
+    }
 
     @Override
     public Cursor find(TableFilter filter, SearchRow first, SearchRow last) {
@@ -161,7 +163,7 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
      */
     protected final long getCostRangeIndex(int[] masks, long rowCount,
             TableFilter[] filters, int filter, SortOrder sortOrder,
-            boolean isScanIndex, HashSet<Column> allColumnsSet) {
+            boolean isScanIndex, AllColumnsForPlan allColumnsSet) {
         rowCount += Constants.COST_ROW_OFFSET;
         int totalSelectivity = 0;
         long rowsCost = rowCount;
@@ -244,10 +246,12 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
         // satisfy the query without needing to read from the primary table
         // (scan index), make that one slightly lower cost.
         boolean needsToReadFromScanIndex = true;
-        if (!isScanIndex && allColumnsSet != null && !allColumnsSet.isEmpty()) {
+        if (!isScanIndex && allColumnsSet != null) {
             boolean foundAllColumnsWeNeed = true;
-            for (Column c : allColumnsSet) {
-                if (c.getTable() == getTable()) {
+            ArrayList<Column> foundCols = allColumnsSet.get(getTable());
+            if (foundCols != null)
+            {
+                for (Column c : foundCols) {
                     boolean found = false;
                     for (Column c2 : columns) {
                         if (c == c2) {
@@ -303,34 +307,34 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     }
 
     /**
-     * Check if one of the columns is NULL and multiple rows with NULL are
-     * allowed using the current compatibility mode for unique indexes. Note:
-     * NULL behavior is complicated in SQL.
+     * Check if this row may have duplicates with the same indexed values in the
+     * current compatibility mode. Duplicates with {@code NULL} values are
+     * allowed in some modes.
      *
-     * @param newRow the row to check
-     * @return true if one of the columns is null and multiple nulls in unique
-     *         indexes are allowed
+     * @param searchRow
+     *            the row to check
+     * @return {@code true} if specified row may have duplicates,
+     *         {@code false otherwise}
      */
-    protected boolean containsNullAndAllowMultipleNull(SearchRow newRow) {
-        Mode mode = database.getMode();
-        if (mode.uniqueIndexSingleNull) {
-            return false;
-        } else if (mode.uniqueIndexSingleNullExceptAllColumnsAreNull) {
+    protected boolean mayHaveNullDuplicates(SearchRow searchRow) {
+        switch (database.getMode().uniqueIndexNullsHandling) {
+        case ALLOW_DUPLICATES_WITH_ANY_NULL:
             for (int index : columnIds) {
-                Value v = newRow.getValue(index);
-                if (v != ValueNull.INSTANCE) {
+                if (searchRow.getValue(index) == ValueNull.INSTANCE) {
+                    return true;
+                }
+            }
+            return false;
+        case ALLOW_DUPLICATES_WITH_ALL_NULLS:
+            for (int index : columnIds) {
+                if (searchRow.getValue(index) != ValueNull.INSTANCE) {
                     return false;
                 }
             }
             return true;
+        default:
+            return false;
         }
-        for (int index : columnIds) {
-            Value v = newRow.getValue(index);
-            if (v == ValueNull.INSTANCE) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -345,11 +349,6 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
         long k1 = rowData.getKey();
         long k2 = compare.getKey();
         if (k1 == k2) {
-            if (isMultiVersion) {
-                int v1 = rowData.getVersion();
-                int v2 = compare.getVersion();
-                return MathUtils.compareInt(v2, v1);
-            }
             return 0;
         }
         return k1 > k2 ? 1 : -1;
@@ -359,7 +358,12 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
         if (a == b) {
             return 0;
         }
-        int comp = table.compareTypeSafe(a, b);
+        boolean aNull = a == ValueNull.INSTANCE;
+        boolean bNull = b == ValueNull.INSTANCE;
+        if (aNull || bNull) {
+            return SortOrder.compareNull(aNull, sortType);
+        }
+        int comp = table.compareValues(a, b);
         if ((sortType & SortOrder.DESCENDING) != 0) {
             comp = -comp;
         }
@@ -443,15 +447,6 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     }
 
     @Override
-    public void commit(int operation, Row row) {
-        // nothing to do
-    }
-
-    void setMultiVersion(boolean multiVersion) {
-        this.isMultiVersion = multiVersion;
-    }
-
-    @Override
     public Row getRow(Session session, long key) {
         throw DbException.getUnsupportedException(toString());
     }
@@ -480,5 +475,11 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     public IndexLookupBatch createLookupBatch(TableFilter[] filters, int filter) {
         // Lookup batching is not supported.
         return null;
+    }
+
+    @Override
+    public void update(Session session, Row oldRow, Row newRow) {
+        remove(session, oldRow);
+        add(session, newRow);
     }
 }

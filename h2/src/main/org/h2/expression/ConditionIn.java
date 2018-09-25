@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -53,7 +53,6 @@ public class ConditionIn extends Condition {
             if (r == ValueNull.INSTANCE) {
                 hasNull = true;
             } else {
-                r = r.convertTo(l.getType());
                 result = Comparison.compareNotNull(database, l, r, Comparison.EQUAL);
                 if (result) {
                     break;
@@ -67,10 +66,10 @@ public class ConditionIn extends Condition {
     }
 
     @Override
-    public void mapColumns(ColumnResolver resolver, int level) {
-        left.mapColumns(resolver, level);
+    public void mapColumns(ColumnResolver resolver, int level, int state) {
+        left.mapColumns(resolver, level, state);
         for (Expression e : valueList) {
-            e.mapColumns(resolver, level);
+            e.mapColumns(resolver, level, state);
         }
         this.queryLevel = Math.max(level, this.queryLevel);
     }
@@ -114,6 +113,9 @@ public class ConditionIn extends Condition {
             if (leftType == Value.UNKNOWN) {
                 return this;
             }
+            if (leftType == Value.ENUM && !(left instanceof ExpressionColumn)) {
+                return this;
+            }
             Expression expr = new ConditionInConstantSet(session, left, valueList);
             expr = expr.optimize(session);
             return expr;
@@ -138,7 +140,6 @@ public class ConditionIn extends Condition {
                 }
             }
             filter.addIndexCondition(IndexCondition.getInList(l, valueList));
-            return;
         }
     }
 
@@ -162,10 +163,10 @@ public class ConditionIn extends Condition {
     }
 
     @Override
-    public void updateAggregate(Session session) {
-        left.updateAggregate(session);
+    public void updateAggregate(Session session, int stage) {
+        left.updateAggregate(session, stage);
         for (Expression e : valueList) {
-            e.updateAggregate(session);
+            e.updateAggregate(session, stage);
         }
     }
 

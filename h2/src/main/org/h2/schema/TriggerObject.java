@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -8,6 +8,7 @@ package org.h2.schema;
 import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.Arrays;
 
 import org.h2.api.ErrorCode;
 import org.h2.api.Trigger;
@@ -51,7 +52,7 @@ public class TriggerObject extends SchemaObjectBase {
     private Trigger triggerCallback;
 
     public TriggerObject(Schema schema, int id, String name, Table table) {
-        initSchemaObjectBase(schema, id, name, Trace.TRIGGER);
+        super(schema, id, name, Trace.TRIGGER);
         this.table = table;
         setTemporary(table.isTemporary());
     }
@@ -73,7 +74,7 @@ public class TriggerObject extends SchemaObjectBase {
             Connection c2 = sysSession.createConnection(false);
             Object obj;
             if (triggerClassName != null) {
-                obj = JdbcUtils.loadUserClass(triggerClassName).newInstance();
+                obj = JdbcUtils.loadUserClass(triggerClassName).getDeclaredConstructor().newInstance();
             } else {
                 obj = loadFromSource();
             }
@@ -94,11 +95,15 @@ public class TriggerObject extends SchemaObjectBase {
             String fullClassName = Constants.USER_PACKAGE + ".trigger." + getName();
             compiler.setSource(fullClassName, triggerSource);
             try {
-                Method m = compiler.getMethod(fullClassName);
-                if (m.getParameterTypes().length > 0) {
-                    throw new IllegalStateException("No parameters are allowed for a trigger");
+                if (SourceCompiler.isJavaxScriptSource(triggerSource)) {
+                    return (Trigger) compiler.getCompiledScript(fullClassName).eval();
+                } else {
+                    final Method m = compiler.getMethod(fullClassName);
+                    if (m.getParameterTypes().length > 0) {
+                        throw new IllegalStateException("No parameters are allowed for a trigger");
+                    }
+                    return (Trigger) m.invoke(null);
                 }
-                return (Trigger) m.invoke(null);
             } catch (DbException e) {
                 throw e;
             } catch (Exception e) {
@@ -198,6 +203,7 @@ public class TriggerObject extends SchemaObjectBase {
      * times for each statement.
      *
      * @param session the session
+     * @param table the table
      * @param oldRow the old row
      * @param newRow the new row
      * @param beforeAction true if this method is called before the operation is
@@ -205,7 +211,7 @@ public class TriggerObject extends SchemaObjectBase {
      * @param rollback when the operation occurred within a rollback
      * @return true if no further action is required (for 'instead of' triggers)
      */
-    public boolean fireRow(Session session, Row oldRow, Row newRow,
+    public boolean fireRow(Session session, Table table, Row oldRow, Row newRow,
             boolean beforeAction, boolean rollback) {
         if (!rowBased || before != beforeAction) {
             return false;
@@ -239,8 +245,7 @@ public class TriggerObject extends SchemaObjectBase {
         newList = convertToObjectList(newRow);
         Object[] newListBackup;
         if (before && newList != null) {
-            newListBackup = new Object[newList.length];
-            System.arraycopy(newList, 0, newListBackup, 0, newList.length);
+            newListBackup = Arrays.copyOf(newList, newList.length);
         } else {
             newListBackup = null;
         }
@@ -256,6 +261,7 @@ public class TriggerObject extends SchemaObjectBase {
                     Object o = newList[i];
                     if (o != newListBackup[i]) {
                         Value v = DataType.convertToValue(session, o, Value.UNKNOWN);
+                        session.getGeneratedKeys().add(table.getColumn(i));
                         newRow.setValue(i, v);
                     }
                 }

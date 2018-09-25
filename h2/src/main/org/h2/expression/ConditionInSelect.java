@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -43,9 +43,7 @@ public class ConditionInSelect extends Condition {
     @Override
     public Value getValue(Session session) {
         query.setSession(session);
-        if (!query.hasOrder()) {
-            query.setDistinct(true);
-        }
+        query.setDistinctIfPossible();
         ResultInterface rows = query.query(0);
         Value l = left.getValue(session);
         if (!rows.hasNext()) {
@@ -53,7 +51,7 @@ public class ConditionInSelect extends Condition {
         } else if (l == ValueNull.INSTANCE) {
             return l;
         }
-        if (!session.getDatabase().getSettings().optimizeInSelect) {
+        if (!database.getSettings().optimizeInSelect) {
             return getValueSlow(rows, l);
         }
         if (all || (compareType != Comparison.EQUAL &&
@@ -62,16 +60,16 @@ public class ConditionInSelect extends Condition {
         }
         int dataType = rows.getColumnType(0);
         if (dataType == Value.NULL) {
-            return ValueBoolean.get(false);
+            return ValueBoolean.FALSE;
         }
-        l = l.convertTo(dataType);
+        l = l.convertTo(dataType, database.getMode());
         if (rows.containsDistinct(new Value[] { l })) {
-            return ValueBoolean.get(true);
+            return ValueBoolean.TRUE;
         }
         if (rows.containsDistinct(new Value[] { ValueNull.INSTANCE })) {
             return ValueNull.INSTANCE;
         }
-        return ValueBoolean.get(false);
+        return ValueBoolean.FALSE;
     }
 
     private Value getValueSlow(ResultInterface rows, Value l) {
@@ -103,8 +101,8 @@ public class ConditionInSelect extends Condition {
     }
 
     @Override
-    public void mapColumns(ColumnResolver resolver, int level) {
-        left.mapColumns(resolver, level);
+    public void mapColumns(ColumnResolver resolver, int level, int state) {
+        left.mapColumns(resolver, level, state);
         query.mapColumns(resolver, level + 1);
         this.queryLevel = Math.max(level, this.queryLevel);
     }
@@ -148,9 +146,9 @@ public class ConditionInSelect extends Condition {
     }
 
     @Override
-    public void updateAggregate(Session session) {
-        left.updateAggregate(session);
-        query.updateAggregate(session);
+    public void updateAggregate(Session session, int stage) {
+        left.updateAggregate(session, stage);
+        query.updateAggregate(session, stage);
     }
 
     @Override

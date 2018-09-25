@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -7,21 +7,26 @@ package org.h2.command.dml;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import org.h2.api.ErrorCode;
 import org.h2.api.Trigger;
-import org.h2.command.CommandInterface;
+import org.h2.command.Parser;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
 import org.h2.engine.Session;
 import org.h2.engine.SysProperties;
+import org.h2.expression.Alias;
 import org.h2.expression.Comparison;
 import org.h2.expression.ConditionAndOr;
 import org.h2.expression.Expression;
 import org.h2.expression.ExpressionColumn;
 import org.h2.expression.ExpressionVisitor;
 import org.h2.expression.Parameter;
+import org.h2.expression.Wildcard;
+import org.h2.expression.aggregate.Aggregate;
+import org.h2.expression.aggregate.Window;
 import org.h2.index.Cursor;
 import org.h2.index.Index;
 import org.h2.index.IndexType;
@@ -40,10 +45,10 @@ import org.h2.table.JoinBatch;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
 import org.h2.table.TableView;
-import org.h2.util.New;
+import org.h2.util.ColumnNamer;
 import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
-import org.h2.util.ValueHashMap;
+import org.h2.util.Utils;
 import org.h2.value.Value;
 import org.h2.value.ValueArray;
 import org.h2.value.ValueNull;
@@ -62,28 +67,58 @@ import org.h2.value.ValueNull;
  * @author Joel Turkel (Group sorted query)
  */
 public class Select extends Query {
-    private TableFilter topTableFilter;
-    private final ArrayList<TableFilter> filters = New.arrayList();
-    private final ArrayList<TableFilter> topFilters = New.arrayList();
-    private ArrayList<Expression> expressions;
-    private Expression[] expressionArray;
+
+    /**
+     * The main (top) table filter.
+     */
+    TableFilter topTableFilter;
+
+    private final ArrayList<TableFilter> filters = Utils.newSmallArrayList();
+    private final ArrayList<TableFilter> topFilters = Utils.newSmallArrayList();
+
     private Expression having;
     private Expression condition;
-    private int visibleColumnCount, distinctColumnCount;
-    private ArrayList<SelectOrderBy> orderList;
+
+    /**
+     * The visible columns (the ones required in the result).
+     */
+    int visibleColumnCount;
+
+    /**
+     * {@code DISTINCT ON(...)} expressions.
+     */
+    private Expression[] distinctExpressions;
+
+    private int[] distinctIndexes;
+
+    private int distinctColumnCount;
     private ArrayList<Expression> group;
-    private int[] groupIndex;
-    private boolean[] groupByExpression;
-    private HashMap<Expression, Object> currentGroup;
+
+    /**
+     * The indexes of the group-by columns.
+     */
+    int[] groupIndex;
+
+    /**
+     * Whether a column in the expression list is part of a group-by.
+     */
+    boolean[] groupByExpression;
+
+    SelectGroups groupData;
+
     private int havingIndex;
-    private boolean isGroupQuery, isGroupSortedQuery;
+    boolean isGroupQuery;
+    private boolean isGroupSortedQuery;
+    private boolean isWindowQuery;
     private boolean isForUpdate, isForUpdateMvcc;
     private double cost;
     private boolean isQuickAggregateQuery, isDistinctQuery;
     private boolean isPrepared, checkInit;
     private boolean sortUsingIndex;
-    private SortOrder sort;
-    private int currentGroupRowId;
+
+    private boolean isGroupWindowStage2;
+
+    private HashMap<String, Window> windows;
 
     public Select(Session session) {
         super(session);
@@ -122,11 +157,23 @@ public class Select extends Query {
         this.expressions = expressions;
     }
 
+    public void setWildcard() {
+        expressions = new ArrayList<>(1);
+        expressions.add(new Wildcard(null, null));
+    }
+
     /**
      * Called if this query contains aggregate functions.
      */
     public void setGroupQuery() {
         isGroupQuery = true;
+    }
+
+    /**
+     * Called if this query contains window functions.
+     */
+    public void setWindowQuery() {
+        isWindowQuery = true;
     }
 
     public void setGroupBy(ArrayList<Expression> group) {
@@ -137,22 +184,62 @@ public class Select extends Query {
         return group;
     }
 
-    public HashMap<Expression, Object> getCurrentGroup() {
-        return currentGroup;
-    }
-
-    public int getCurrentGroupRowId() {
-        return currentGroupRowId;
+    public SelectGroups getGroupDataIfCurrent(boolean window) {
+        return groupData != null && (window || groupData.isCurrentGroup()) ? groupData : null;
     }
 
     @Override
-    public void setOrder(ArrayList<SelectOrderBy> order) {
-        orderList = order;
+    public void setDistinct() {
+        if (distinctExpressions != null) {
+            throw DbException.getUnsupportedException("DISTINCT ON together with DISTINCT");
+        }
+        distinct = true;
+    }
+
+    /**
+     * Set the distinct expressions.
+     */
+    public void setDistinct(Expression[] distinctExpressions) {
+        if (distinct) {
+            throw DbException.getUnsupportedException("DISTINCT ON together with DISTINCT");
+        }
+        this.distinctExpressions = distinctExpressions;
     }
 
     @Override
-    public boolean hasOrder() {
-        return orderList != null || sort != null;
+    public void setDistinctIfPossible() {
+        if (!isAnyDistinct() && offsetExpr == null && limitExpr == null) {
+            distinct = true;
+        }
+    }
+
+    @Override
+    public boolean isAnyDistinct() {
+        return distinct || distinctExpressions != null;
+    }
+
+    /**
+     * Adds a named window definition.
+     *
+     * @param name name
+     * @param window window definition
+     * @return true if a new definition was added, false if old definition was replaced
+     */
+    public boolean addWindow(String name, Window window) {
+        if (windows == null) {
+            windows = new HashMap<>();
+        }
+        return windows.put(name, window) == null;
+    }
+
+    /**
+     * Returns a window with specified name, or null.
+     *
+     * @param name name of the window
+     * @return the window with specified name, or null
+     */
+    public Window getWindow(String name) {
+        return windows != null ? windows.get(name) : null;
     }
 
     /**
@@ -168,8 +255,13 @@ public class Select extends Query {
         }
     }
 
-    private LazyResult queryGroupSorted(int columnCount, ResultTarget result) {
+    public Expression getCondition() {
+        return condition;
+    }
+
+    private LazyResult queryGroupSorted(int columnCount, ResultTarget result, long offset, boolean quickOffset) {
         LazyResultGroupSorted lazyResult = new LazyResultGroupSorted(expressionArray, columnCount);
+        skipOffset(lazyResult, offset, quickOffset);
         if (result == null) {
             return lazyResult;
         }
@@ -179,7 +271,14 @@ public class Select extends Query {
         return null;
     }
 
-    private Value[] createGroupSortedRow(Value[] keyValues, int columnCount) {
+    /**
+     * Create a row with the current values, for queries with group-sort.
+     *
+     * @param keyValues the key values
+     * @param columnCount the number of columns
+     * @return the row
+     */
+    Value[] createGroupSortedRow(Value[] keyValues, int columnCount) {
         Value[] row = new Value[columnCount];
         for (int j = 0; groupIndex != null && j < groupIndex.length; j++) {
             row[groupIndex[j]] = keyValues[j];
@@ -203,22 +302,11 @@ public class Select extends Query {
             return row;
         }
         // remove columns so that 'distinct' can filter duplicate rows
-        Value[] r2 = new Value[distinctColumnCount];
-        System.arraycopy(row, 0, r2, 0, distinctColumnCount);
-        return r2;
+        return Arrays.copyOf(row, distinctColumnCount);
     }
 
     private boolean isHavingNullOrFalse(Value[] row) {
-        if (havingIndex >= 0) {
-            Value v = row[havingIndex];
-            if (v == ValueNull.INSTANCE) {
-                return true;
-            }
-            if (!Boolean.TRUE.equals(v.getBoolean())) {
-                return true;
-            }
-        }
-        return false;
+        return havingIndex >= 0 && !row[havingIndex].getBoolean();
     }
 
     private Index getGroupSortedIndex() {
@@ -227,8 +315,7 @@ public class Select extends Query {
         }
         ArrayList<Index> indexes = topTableFilter.getTable().getIndexes();
         if (indexes != null) {
-            for (int i = 0, size = indexes.size(); i < size; i++) {
-                Index index = indexes.get(i);
+            for (Index index : indexes) {
                 if (index.getIndexType().isScan()) {
                     continue;
                 }
@@ -295,63 +382,92 @@ public class Select extends Query {
         return count;
     }
 
-    private boolean isConditionMet() {
-        return condition == null ||
-                Boolean.TRUE.equals(condition.getBooleanValue(session));
+    boolean isConditionMet() {
+        return condition == null || condition.getBooleanValue(session);
     }
 
-    private void queryGroup(int columnCount, LocalResult result) {
-        ValueHashMap<HashMap<Expression, Object>> groups =
-                ValueHashMap.newInstance();
+    private void queryWindow(int columnCount, LocalResult result, long offset, boolean quickOffset) {
+        initGroupData(columnCount);
+        try {
+            gatherGroup(columnCount, Aggregate.STAGE_WINDOW);
+            processGroupResult(columnCount, result, offset, quickOffset);
+        } finally {
+            groupData.reset();
+        }
+    }
+
+    private void queryGroupWindow(int columnCount, LocalResult result, long offset, boolean quickOffset) {
+        initGroupData(columnCount);
+        try {
+            gatherGroup(columnCount, Aggregate.STAGE_GROUP);
+            try {
+                isGroupWindowStage2 = true;
+                while (groupData.next() != null) {
+                    if (havingIndex < 0 || expressions.get(havingIndex).getBooleanValue(session)) {
+                        updateAgg(columnCount, Aggregate.STAGE_WINDOW);
+                    } else {
+                        groupData.remove();
+                    }
+                }
+                groupData.done();
+                processGroupResult(columnCount, result, offset, quickOffset);
+            } finally {
+                isGroupWindowStage2 = false;
+            }
+        } finally {
+            groupData.reset();
+        }
+    }
+
+    private void queryGroup(int columnCount, LocalResult result, long offset, boolean quickOffset) {
+        initGroupData(columnCount);
+        try {
+            gatherGroup(columnCount, Aggregate.STAGE_GROUP);
+            processGroupResult(columnCount, result, offset, quickOffset);
+        } finally {
+            groupData.reset();
+        }
+    }
+
+    private void initGroupData(int columnCount) {
+        if (groupData == null) {
+            groupData = SelectGroups.getInstance(session, expressions, isGroupQuery, groupIndex);
+        } else {
+            updateAgg(columnCount, Aggregate.STAGE_RESET);
+        }
+        groupData.reset();
+    }
+
+    private void gatherGroup(int columnCount, int stage) {
         int rowNumber = 0;
         setCurrentRowNumber(0);
-        currentGroup = null;
-        ValueArray defaultGroup = ValueArray.get(new Value[0]);
         int sampleSize = getSampleSizeValue(session);
         while (topTableFilter.next()) {
             setCurrentRowNumber(rowNumber + 1);
             if (isConditionMet()) {
-                Value key;
                 rowNumber++;
-                if (groupIndex == null) {
-                    key = defaultGroup;
-                } else {
-                    Value[] keyValues = new Value[groupIndex.length];
-                    // update group
-                    for (int i = 0; i < groupIndex.length; i++) {
-                        int idx = groupIndex[i];
-                        Expression expr = expressions.get(idx);
-                        keyValues[i] = expr.getValue(session);
-                    }
-                    key = ValueArray.get(keyValues);
-                }
-                HashMap<Expression, Object> values = groups.get(key);
-                if (values == null) {
-                    values = new HashMap<Expression, Object>();
-                    groups.put(key, values);
-                }
-                currentGroup = values;
-                currentGroupRowId++;
-                int len = columnCount;
-                for (int i = 0; i < len; i++) {
-                    if (groupByExpression == null || !groupByExpression[i]) {
-                        Expression expr = expressions.get(i);
-                        expr.updateAggregate(session);
-                    }
-                }
+                groupData.nextSource();
+                updateAgg(columnCount, stage);
                 if (sampleSize > 0 && rowNumber >= sampleSize) {
                     break;
                 }
             }
         }
-        if (groupIndex == null && groups.size() == 0) {
-            groups.put(defaultGroup, new HashMap<Expression, Object>());
+        groupData.done();
+    }
+
+    void updateAgg(int columnCount, int stage) {
+        for (int i = 0; i < columnCount; i++) {
+            if (groupByExpression == null || !groupByExpression[i]) {
+                Expression expr = expressions.get(i);
+                expr.updateAggregate(session, stage);
+            }
         }
-        ArrayList<Value> keys = groups.keys();
-        for (Value v : keys) {
-            ValueArray key = (ValueArray) v;
-            currentGroup = groups.get(key);
-            Value[] keyValues = key.getList();
+    }
+
+    private void processGroupResult(int columnCount, LocalResult result, long offset, boolean quickOffset) {
+        for (ValueArray currentGroupsKey; (currentGroupsKey = groupData.next()) != null;) {
+            Value[] keyValues = currentGroupsKey.getList();
             Value[] row = new Value[columnCount];
             for (int j = 0; groupIndex != null && j < groupIndex.length; j++) {
                 row[groupIndex[j]] = keyValues[j];
@@ -364,6 +480,10 @@ public class Select extends Query {
                 row[j] = expr.getValue(session);
             }
             if (isHavingNullOrFalse(row)) {
+                continue;
+            }
+            if (quickOffset && offset > 0) {
+                offset--;
                 continue;
             }
             row = keepOnlyDistinct(row, columnCount);
@@ -383,7 +503,7 @@ public class Select extends Query {
         if (sort == null) {
             return null;
         }
-        ArrayList<Column> sortColumns = New.arrayList();
+        ArrayList<Column> sortColumns = Utils.newSmallArrayList();
         for (int idx : sort.getQueryColumnIndexes()) {
             if (idx < 0 || idx >= expressions.size()) {
                 throw DbException.getInvalidValueException("ORDER BY", idx + 1);
@@ -402,16 +522,15 @@ public class Select extends Query {
             }
             sortColumns.add(exprCol.getColumn());
         }
-        Column[] sortCols = sortColumns.toArray(new Column[sortColumns.size()]);
-        int[] sortTypes = sort.getSortTypes();
+        Column[] sortCols = sortColumns.toArray(new Column[0]);
         if (sortCols.length == 0) {
             // sort just on constants - can use scan index
             return topTableFilter.getTable().getScanIndex(session);
         }
         ArrayList<Index> list = topTableFilter.getTable().getIndexes();
         if (list != null) {
-            for (int i = 0, size = list.size(); i < size; i++) {
-                Index index = list.get(i);
+            int[] sortTypes = sort.getSortTypesWithNullPosition();
+            for (Index index : list) {
                 if (index.getCreateSQL() == null) {
                     // can't use the scan index
                     continue;
@@ -433,9 +552,7 @@ public class Select extends Query {
                         ok = false;
                         break;
                     }
-                    if (idxCol.sortType != sortTypes[j]) {
-                        // NULL FIRST for ascending and NULLS LAST
-                        // for descending would actually match the default
+                    if (SortOrder.addExplicitNullPosition(idxCol.sortType) != sortTypes[j]) {
                         ok = false;
                         break;
                     }
@@ -455,14 +572,13 @@ public class Select extends Query {
         return null;
     }
 
-    private void queryDistinct(ResultTarget result, long limitRows) {
-        // limitRows must be long, otherwise we get an int overflow
-        // if limitRows is at or near Integer.MAX_VALUE
-        // limitRows is never 0 here
-        if (limitRows > 0 && offsetExpr != null) {
-            int offset = offsetExpr.getValue(session).getInt();
-            if (offset > 0) {
-                limitRows += offset;
+    private void queryDistinct(ResultTarget result, long offset, long limitRows, boolean withTies,
+            boolean quickOffset) {
+        if (limitRows > 0 && offset > 0) {
+            limitRows += offset;
+            if (limitRows < 0) {
+                // Overflow
+                limitRows = Long.MAX_VALUE;
             }
         }
         int rowNumber = 0;
@@ -471,8 +587,11 @@ public class Select extends Query {
         SearchRow first = null;
         int columnIndex = index.getColumns()[0].getColumnId();
         int sampleSize = getSampleSizeValue(session);
+        if (!quickOffset) {
+            offset = 0;
+        }
         while (true) {
-            setCurrentRowNumber(rowNumber + 1);
+            setCurrentRowNumber(++rowNumber);
             Cursor cursor = index.findNext(session, first, null);
             if (!cursor.next()) {
                 break;
@@ -483,11 +602,14 @@ public class Select extends Query {
                 first = topTableFilter.getTable().getTemplateSimpleRow(true);
             }
             first.setValue(columnIndex, value);
+            if (offset > 0) {
+                offset--;
+                continue;
+            }
             Value[] row = { value };
             result.addRow(row);
-            rowNumber++;
             if ((sort == null || sortUsingIndex) && limitRows > 0 &&
-                    rowNumber >= limitRows) {
+                    rowNumber >= limitRows && !withTies) {
                 break;
             }
             if (sampleSize > 0 && rowNumber >= sampleSize) {
@@ -496,54 +618,76 @@ public class Select extends Query {
         }
     }
 
-    private LazyResult queryFlat(int columnCount, ResultTarget result, long limitRows) {
-        // limitRows must be long, otherwise we get an int overflow
-        // if limitRows is at or near Integer.MAX_VALUE
-        // limitRows is never 0 here
-        if (limitRows > 0 && offsetExpr != null) {
-            int offset = offsetExpr.getValue(session).getInt();
-            if (offset > 0) {
-                limitRows += offset;
+    private LazyResult queryFlat(int columnCount, ResultTarget result, long offset, long limitRows, boolean withTies,
+            boolean quickOffset) {
+        if (limitRows > 0 && offset > 0 && !quickOffset) {
+            limitRows += offset;
+            if (limitRows < 0) {
+                // Overflow
+                limitRows = Long.MAX_VALUE;
             }
         }
-        ArrayList<Row> forUpdateRows = null;
-        if (isForUpdateMvcc) {
-            forUpdateRows = New.arrayList();
-        }
+        ArrayList<Row> forUpdateRows = this.isForUpdateMvcc ? Utils.<Row>newSmallArrayList() : null;
         int sampleSize = getSampleSizeValue(session);
         LazyResultQueryFlat lazyResult = new LazyResultQueryFlat(expressionArray,
                 sampleSize, columnCount);
+        skipOffset(lazyResult, offset, quickOffset);
         if (result == null) {
             return lazyResult;
         }
-        while (lazyResult.next()) {
-            if (isForUpdateMvcc) {
+        if (limitRows < 0 || sort != null && !sortUsingIndex || withTies && !quickOffset) {
+            limitRows = Long.MAX_VALUE;
+        }
+        Value[] row = null;
+        while (result.getRowCount() < limitRows && lazyResult.next()) {
+            if (forUpdateRows != null) {
                 topTableFilter.lockRowAdd(forUpdateRows);
             }
-            result.addRow(lazyResult.currentRow());
-            if ((sort == null || sortUsingIndex) && limitRows > 0 &&
-                    result.getRowCount() >= limitRows) {
-                break;
-            }
+            row = lazyResult.currentRow();
+            result.addRow(row);
         }
-        if (isForUpdateMvcc) {
+        if (limitRows != Long.MAX_VALUE && withTies && sort != null && row != null) {
+            Value[] expected = row;
+            while (lazyResult.next()) {
+                row = lazyResult.currentRow();
+                if (sort.compare(expected, row) != 0) {
+                    break;
+                }
+                if (forUpdateRows != null) {
+                    topTableFilter.lockRowAdd(forUpdateRows);
+                }
+                result.addRow(row);
+            }
+            result.limitsWereApplied();
+        }
+        if (forUpdateRows != null) {
             topTableFilter.lockRows(forUpdateRows);
         }
         return null;
     }
 
-    private void queryQuick(int columnCount, ResultTarget result) {
+    private static void skipOffset(LazyResultSelect lazyResult, long offset, boolean quickOffset) {
+        if (quickOffset) {
+            while (offset > 0 && lazyResult.next()) {
+                offset--;
+            }
+        }
+    }
+
+    private void queryQuick(int columnCount, ResultTarget result, boolean skipResult) {
         Value[] row = new Value[columnCount];
         for (int i = 0; i < columnCount; i++) {
             Expression expr = expressions.get(i);
             row[i] = expr.getValue(session);
         }
-        result.addRow(row);
+        if (!skipResult) {
+            result.addRow(row);
+        }
     }
 
     @Override
     public ResultInterface queryMeta() {
-        LocalResult result = new LocalResult(session, expressionArray,
+        LocalResult result = session.getDatabase().getResultFactory().create(session, expressionArray,
                 visibleColumnCount);
         result.done();
         return result;
@@ -561,30 +705,59 @@ public class Select extends Query {
                 limitRows = Math.min(l, limitRows);
             }
         }
+        boolean fetchPercent = this.fetchPercent;
+        if (fetchPercent) {
+            // Need to check it row, because negative limit has special treatment later
+            if (limitRows < 0 || limitRows > 100) {
+                throw DbException.getInvalidValueException("FETCH PERCENT", limitRows);
+            }
+            // 0 PERCENT means 0
+            if (limitRows == 0) {
+                fetchPercent = false;
+            }
+        }
+        long offset;
+        if (offsetExpr != null) {
+            offset = offsetExpr.getValue(session).getLong();
+            if (offset < 0) {
+                offset = 0;
+            }
+        } else {
+            offset = 0;
+        }
         boolean lazy = session.isLazyQueryExecution() &&
                 target == null && !isForUpdate && !isQuickAggregateQuery &&
-                limitRows != 0 && offsetExpr == null && isReadOnly();
+                limitRows != 0 && !fetchPercent && !withTies && offset == 0 && isReadOnly();
         int columnCount = expressions.size();
         LocalResult result = null;
         if (!lazy && (target == null ||
                 !session.getDatabase().getSettings().optimizeInsertFromSelect)) {
             result = createLocalResult(result);
         }
-        if (sort != null && (!sortUsingIndex || distinct)) {
+        // Do not add rows before OFFSET to result if possible
+        boolean quickOffset = !fetchPercent;
+        if (sort != null && (!sortUsingIndex || isAnyDistinct() || withTies)) {
             result = createLocalResult(result);
             result.setSortOrder(sort);
+            if (!sortUsingIndex) {
+                quickOffset = false;
+            }
         }
-        if (distinct && !isDistinctQuery) {
+        if (distinct) {
+            if (!isDistinctQuery) {
+                quickOffset = false;
+                result = createLocalResult(result);
+                result.setDistinct();
+            }
+        } else if (distinctExpressions != null) {
+            quickOffset = false;
             result = createLocalResult(result);
-            result.setDistinct();
+            result.setDistinct(distinctIndexes);
         }
-        if (randomAccessResult) {
+        if (isWindowQuery || isGroupQuery && !isGroupSortedQuery) {
             result = createLocalResult(result);
         }
-        if (isGroupQuery && !isGroupSortedQuery) {
-            result = createLocalResult(result);
-        }
-        if (!lazy && (limitRows >= 0 || offsetExpr != null)) {
+        if (!lazy && (limitRows >= 0 || offset > 0)) {
             result = createLocalResult(result);
         }
         topTableFilter.startQuery(session);
@@ -594,7 +767,7 @@ public class Select extends Query {
             if (isGroupQuery) {
                 throw DbException.getUnsupportedException(
                         "MVCC=TRUE && FOR UPDATE && GROUP");
-            } else if (distinct) {
+            } else if (isAnyDistinct()) {
                 throw DbException.getUnsupportedException(
                         "MVCC=TRUE && FOR UPDATE && DISTINCT");
             } else if (isQuickAggregateQuery) {
@@ -610,19 +783,30 @@ public class Select extends Query {
         lazy &= to == null;
         LazyResult lazyResult = null;
         if (limitRows != 0) {
+            // Cannot apply limit now if percent is specified
+            int limit = fetchPercent ? -1 : limitRows;
             try {
                 if (isQuickAggregateQuery) {
-                    queryQuick(columnCount, to);
+                    queryQuick(columnCount, to, quickOffset && offset > 0);
+                } else if (isWindowQuery) {
+                    if (isGroupQuery) {
+                        queryGroupWindow(columnCount, result, offset, quickOffset);
+                    } else {
+                        queryWindow(columnCount, result, offset, quickOffset);
+                    }
                 } else if (isGroupQuery) {
                     if (isGroupSortedQuery) {
-                        lazyResult = queryGroupSorted(columnCount, to);
+                        lazyResult = queryGroupSorted(columnCount, to, offset, quickOffset);
                     } else {
-                        queryGroup(columnCount, result);
+                        queryGroup(columnCount, result, offset, quickOffset);
                     }
                 } else if (isDistinctQuery) {
-                    queryDistinct(to, limitRows);
+                    queryDistinct(to, offset, limit, withTies, quickOffset);
                 } else {
-                    lazyResult = queryFlat(columnCount, to, limitRows);
+                    lazyResult = queryFlat(columnCount, to, offset, limit, withTies, quickOffset);
+                }
+                if (quickOffset) {
+                    offset = 0;
                 }
             } finally {
                 if (!lazy) {
@@ -635,16 +819,28 @@ public class Select extends Query {
             if (limitRows > 0) {
                 lazyResult.setLimit(limitRows);
             }
-            return lazyResult;
+            if (randomAccessResult) {
+                return convertToDistinct(lazyResult);
+            } else {
+                return lazyResult;
+            }
         }
-        if (offsetExpr != null) {
-            result.setOffset(offsetExpr.getValue(session).getInt());
+        if (offset != 0) {
+            if (offset > Integer.MAX_VALUE) {
+                throw DbException.getInvalidValueException("OFFSET", offset);
+            }
+            result.setOffset((int) offset);
         }
         if (limitRows >= 0) {
             result.setLimit(limitRows);
+            result.setFetchPercent(fetchPercent);
+            result.setWithTies(withTies);
         }
         if (result != null) {
             result.done();
+            if (randomAccessResult && !distinct) {
+                result = convertToDistinct(result);
+            }
             if (target != null) {
                 while (result.next()) {
                     target.addRow(result.currentRow());
@@ -657,7 +853,10 @@ public class Select extends Query {
         return null;
     }
 
-    private void resetJoinBatchAfterQuery() {
+    /**
+     * Reset the batch-join after the query result is closed.
+     */
+    void resetJoinBatchAfterQuery() {
         JoinBatch jb = getJoinBatch();
         if (jb != null) {
             jb.reset(false);
@@ -665,8 +864,21 @@ public class Select extends Query {
     }
 
     private LocalResult createLocalResult(LocalResult old) {
-        return old != null ? old : new LocalResult(session, expressionArray,
+        return old != null ? old : session.getDatabase().getResultFactory().create(session, expressionArray,
                 visibleColumnCount);
+    }
+
+    private LocalResult convertToDistinct(ResultInterface result) {
+        LocalResult distinctResult = session.getDatabase().getResultFactory().create(session,
+            expressionArray, visibleColumnCount);
+        distinctResult.setDistinct();
+        result.reset();
+        while (result.next()) {
+            distinctResult.addRow(result.currentRow());
+        }
+        result.close();
+        distinctResult.done();
+        return distinctResult;
     }
 
     private void expandColumnList() {
@@ -720,8 +932,9 @@ public class Select extends Query {
             if (filter.isNaturalJoinColumn(c)) {
                 continue;
             }
+            String name = filter.getDerivedColumnName(c);
             ExpressionColumn ec = new ExpressionColumn(
-                    session.getDatabase(), null, alias, c.getName());
+                    session.getDatabase(), null, alias, name != null ? name : c.getName());
             expressions.add(index++, ec);
         }
         return index;
@@ -735,8 +948,8 @@ public class Select extends Query {
         expandColumnList();
         visibleColumnCount = expressions.size();
         ArrayList<String> expressionSQL;
-        if (orderList != null || group != null) {
-            expressionSQL = New.arrayList();
+        if (distinctExpressions != null || orderList != null || group != null) {
+            expressionSQL = new ArrayList<>(visibleColumnCount);
             for (int i = 0; i < visibleColumnCount; i++) {
                 Expression expr = expressions.get(i);
                 expr = expr.getNonAliasExpression();
@@ -746,9 +959,23 @@ public class Select extends Query {
         } else {
             expressionSQL = null;
         }
+        if (distinctExpressions != null) {
+            BitSet set = new BitSet();
+            for (Expression e : distinctExpressions) {
+                set.set(initExpression(session, expressions, expressionSQL, e, visibleColumnCount, false,
+                        filters));
+            }
+            int idx = 0, cnt = set.cardinality();
+            distinctIndexes = new int[cnt];
+            for (int i = 0; i < cnt; i++) {
+                idx = set.nextSetBit(idx);
+                distinctIndexes[i] = idx;
+                idx++;
+            }
+        }
         if (orderList != null) {
             initOrder(session, expressions, expressionSQL, orderList,
-                    visibleColumnCount, distinct, filters);
+                    visibleColumnCount, isAnyDistinct(), filters);
         }
         distinctColumnCount = expressions.size();
         if (having != null) {
@@ -757,6 +984,10 @@ public class Select extends Query {
             having = null;
         } else {
             havingIndex = -1;
+        }
+
+        if (withTies && !hasOrder()) {
+            throw DbException.get(ErrorCode.WITH_TIES_WITHOUT_ORDER_BY);
         }
 
         Database db = session.getDatabase();
@@ -816,7 +1047,7 @@ public class Select extends Query {
         if (havingIndex >= 0) {
             Expression expr = expressions.get(havingIndex);
             SelectListColumnResolver res = new SelectListColumnResolver(this);
-            expr.mapColumns(res, 0);
+            expr.mapColumns(res, 0, Expression.MAP_INITIAL);
         }
         checkInit = true;
     }
@@ -834,8 +1065,15 @@ public class Select extends Query {
             sort = prepareOrder(orderList, expressions.size());
             orderList = null;
         }
+        ColumnNamer columnNamer = new ColumnNamer(session);
         for (int i = 0; i < expressions.size(); i++) {
             Expression e = expressions.get(i);
+            String proposedColumnName = e.getAlias();
+            String columnName = columnNamer.getColumnName(e, i, proposedColumnName);
+            // if the name changed, create an alias
+            if (!columnName.equals(proposedColumnName)) {
+                e = new Alias(e, columnName, true);
+            }
             expressions.set(i, e.optimize(session));
         }
         if (condition != null) {
@@ -862,7 +1100,7 @@ public class Select extends Query {
                 isQuickAggregateQuery = isEverything(optimizable);
             }
         }
-        cost = preparePlan(session.isParsingView());
+        cost = preparePlan(session.isParsingCreateView());
         if (distinct && session.getDatabase().getSettings().optimizeDistinct &&
                 !isGroupQuery && filters.size() == 1 &&
                 expressions.size() == 1 && condition == null) {
@@ -940,14 +1178,13 @@ public class Select extends Query {
                 isGroupSortedQuery = true;
             }
         }
-        expressionArray = new Expression[expressions.size()];
-        expressions.toArray(expressionArray);
+        expressionArray = expressions.toArray(new Expression[0]);
         isPrepared = true;
     }
 
     @Override
     public void prepareJoinBatch() {
-        ArrayList<TableFilter> list = New.arrayList();
+        ArrayList<TableFilter> list = new ArrayList<>();
         TableFilter f = getTopTableFilter();
         do {
             if (f.getNestedJoin() != null) {
@@ -957,7 +1194,7 @@ public class Select extends Query {
             list.add(f);
             f = f.getJoin();
         } while (f != null);
-        TableFilter[] fs = list.toArray(new TableFilter[list.size()]);
+        TableFilter[] fs = list.toArray(new TableFilter[0]);
         // prepare join batch
         JoinBatch jb = null;
         for (int i = fs.length - 1; i >= 0; i--) {
@@ -976,7 +1213,7 @@ public class Select extends Query {
 
     @Override
     public HashSet<Table> getTables() {
-        HashSet<Table> set = New.hashSet();
+        HashSet<Table> set = new HashSet<>();
         for (TableFilter filter : filters) {
             set.add(filter.getTable());
         }
@@ -985,15 +1222,13 @@ public class Select extends Query {
 
     @Override
     public void fireBeforeSelectTriggers() {
-        for (int i = 0, size = filters.size(); i < size; i++) {
-            TableFilter filter = filters.get(i);
+        for (TableFilter filter : filters) {
             filter.getTable().fire(session, Trigger.SELECT, true);
         }
     }
 
     private double preparePlan(boolean parse) {
-        TableFilter[] topArray = topFilters.toArray(
-                new TableFilter[topFilters.size()]);
+        TableFilter[] topArray = topFilters.toArray(new TableFilter[0]);
         for (TableFilter t : topArray) {
             t.setFullCondition(condition);
         }
@@ -1024,26 +1259,10 @@ public class Select extends Query {
             Expression on = f.getJoinCondition();
             if (on != null) {
                 if (!on.isEverything(ExpressionVisitor.EVALUATABLE_VISITOR)) {
-                    if (session.getDatabase().getSettings().nestedJoins) {
-                        // need to check that all added are bound to a table
-                        on = on.optimize(session);
-                        if (!f.isJoinOuter() && !f.isJoinOuterIndirect()) {
-                            f.removeJoinCondition();
-                            addCondition(on);
-                        }
-                    } else {
-                        if (f.isJoinOuter()) {
-                            // this will check if all columns exist - it may or
-                            // may not throw an exception
-                            on = on.optimize(session);
-                            // it is not supported even if the columns exist
-                            throw DbException.get(
-                                    ErrorCode.UNSUPPORTED_OUTER_JOIN_CONDITION_1,
-                                    on.getSQL());
-                        }
+                    // need to check that all added are bound to a table
+                    on = on.optimize(session);
+                    if (!f.isJoinOuter() && !f.isJoinOuterIndirect()) {
                         f.removeJoinCondition();
-                        // need to check that all added are bound to a table
-                        on = on.optimize(session);
                         addCondition(on);
                     }
                 }
@@ -1068,25 +1287,43 @@ public class Select extends Query {
         // can not use the field sqlStatement because the parameter
         // indexes may be incorrect: ? may be in fact ?2 for a subquery
         // but indexes may be set manually as well
-        Expression[] exprList = expressions.toArray(
-                new Expression[expressions.size()]);
+        Expression[] exprList = expressions.toArray(new Expression[0]);
         StatementBuilder buff = new StatementBuilder();
         for (TableFilter f : topFilters) {
             Table t = f.getTable();
-            if (t.isView() && ((TableView) t).isRecursive()) {
-                buff.append("WITH RECURSIVE ").append(t.getName()).append('(');
-                buff.resetCount();
-                for (Column c : t.getColumns()) {
-                    buff.appendExceptFirst(",");
-                    buff.append(c.getName());
+            TableView tableView = t.isView() ? (TableView) t : null;
+            if (tableView != null && tableView.isRecursive() && tableView.isTableExpression()) {
+
+                if (!tableView.isTemporary()) {
+                    // skip the generation of plan SQL for this already recursive persistent CTEs,
+                    // since using a with statement will re-create the common table expression
+                    // views.
+                } else {
+                    buff.append("WITH RECURSIVE ")
+                            .append(t.getSchema().getSQL()).append('.').append(Parser.quoteIdentifier(t.getName()))
+                            .append('(');
+                    buff.resetCount();
+                    for (Column c : t.getColumns()) {
+                        buff.appendExceptFirst(",");
+                        buff.append(c.getName());
+                    }
+                    buff.append(") AS ").append(t.getSQL()).append('\n');
                 }
-                buff.append(") AS ").append(t.getSQL()).append("\n");
             }
         }
         buff.resetCount();
         buff.append("SELECT");
-        if (distinct) {
+        if (isAnyDistinct()) {
             buff.append(" DISTINCT");
+            if (distinctExpressions != null) {
+                buff.append(" ON(");
+                for (Expression distinctExpression: distinctExpressions) {
+                    buff.appendExceptFirst(", ");
+                    buff.append(distinctExpression.getSQL());
+                }
+                buff.append(')');
+                buff.resetCount();
+            }
         }
         for (int i = 0; i < visibleColumnCount; i++) {
             buff.appendExceptFirst(",");
@@ -1160,14 +1397,7 @@ public class Select extends Query {
                 buff.append(StringUtils.unEnclose(o.getSQL()));
             }
         }
-        if (limitExpr != null) {
-            buff.append("\nLIMIT ").append(
-                    StringUtils.unEnclose(limitExpr.getSQL()));
-            if (offsetExpr != null) {
-                buff.append(" OFFSET ").append(
-                        StringUtils.unEnclose(offsetExpr.getSQL()));
-            }
-        }
+        appendLimitToSQL(buff.builder());
         if (sampleSizeExpr != null) {
             buff.append("\nSAMPLE_SIZE ").append(
                     StringUtils.unEnclose(sampleSizeExpr.getSQL()));
@@ -1211,15 +1441,10 @@ public class Select extends Query {
     }
 
     @Override
-    public ArrayList<Expression> getExpressions() {
-        return expressions;
-    }
-
-    @Override
     public void setForUpdate(boolean b) {
         this.isForUpdate = b;
         if (session.getDatabase().getSettings().selectForUpdateMvcc &&
-                session.getDatabase().isMultiVersion()) {
+                session.getDatabase().isMVStore()) {
             isForUpdateMvcc = b;
         }
     }
@@ -1227,10 +1452,10 @@ public class Select extends Query {
     @Override
     public void mapColumns(ColumnResolver resolver, int level) {
         for (Expression e : expressions) {
-            e.mapColumns(resolver, level);
+            e.mapColumns(resolver, level, Expression.MAP_INITIAL);
         }
         if (condition != null) {
-            condition.mapColumns(resolver, level);
+            condition.mapColumns(resolver, level, Expression.MAP_INITIAL);
         }
     }
 
@@ -1253,6 +1478,34 @@ public class Select extends Query {
      */
     public boolean isQuickAggregateQuery() {
         return isQuickAggregateQuery;
+    }
+
+    /**
+     * Checks if this query is a group query.
+     *
+     * @return whether this query is a group query.
+     */
+    public boolean isGroupQuery() {
+        return isGroupQuery;
+    }
+
+    /**
+     * Checks if this query contains window functions.
+     *
+     * @return whether this query contains window functions
+     */
+    public boolean isWindowQuery() {
+        return isWindowQuery;
+    }
+
+    /**
+     * Checks if window stage of group window query is performed. If true,
+     * column resolver may not be used.
+     *
+     * @return true if window stage of group window query is performed
+     */
+    public boolean isGroupWindowStage2() {
+        return isGroupWindowStage2;
     }
 
     @Override
@@ -1300,15 +1553,15 @@ public class Select extends Query {
     }
 
     @Override
-    public void updateAggregate(Session s) {
+    public void updateAggregate(Session s, int stage) {
         for (Expression e : expressions) {
-            e.updateAggregate(s);
+            e.updateAggregate(s, stage);
         }
         if (condition != null) {
-            condition.updateAggregate(s);
+            condition.updateAggregate(s, stage);
         }
         if (having != null) {
-            having.updateAggregate(s);
+            having.updateAggregate(s, stage);
         }
     }
 
@@ -1319,8 +1572,7 @@ public class Select extends Query {
             if (isForUpdate) {
                 return false;
             }
-            for (int i = 0, size = filters.size(); i < size; i++) {
-                TableFilter f = filters.get(i);
+            for (TableFilter f : filters) {
                 if (!f.getTable().isDeterministic()) {
                     return false;
                 }
@@ -1328,8 +1580,7 @@ public class Select extends Query {
             break;
         }
         case ExpressionVisitor.SET_MAX_DATA_MODIFICATION_ID: {
-            for (int i = 0, size = filters.size(); i < size; i++) {
-                TableFilter f = filters.get(i);
+            for (TableFilter f : filters) {
                 long m = f.getTable().getMaxDataModificationId();
                 visitor.addDataModificationId(m);
             }
@@ -1342,8 +1593,7 @@ public class Select extends Query {
             break;
         }
         case ExpressionVisitor.GET_DEPENDENCIES: {
-            for (int i = 0, size = filters.size(); i < size; i++) {
-                TableFilter f = filters.get(i);
+            for (TableFilter f : filters) {
                 Table table = f.getTable();
                 visitor.addDependency(table);
                 table.addDependencies(visitor.getDependencies());
@@ -1353,21 +1603,18 @@ public class Select extends Query {
         default:
         }
         ExpressionVisitor v2 = visitor.incrementQueryLevel(1);
-        boolean result = true;
-        for (int i = 0, size = expressions.size(); i < size; i++) {
-            Expression e = expressions.get(i);
+        for (Expression e : expressions) {
             if (!e.isEverything(v2)) {
-                result = false;
-                break;
+                return false;
             }
         }
-        if (result && condition != null && !condition.isEverything(v2)) {
-            result = false;
+        if (condition != null && !condition.isEverything(v2)) {
+            return false;
         }
-        if (result && having != null && !having.isEverything(v2)) {
-            result = false;
+        if (having != null && !having.isEverything(v2)) {
+            return false;
         }
-        return result;
+        return true;
     }
 
     @Override
@@ -1382,16 +1629,8 @@ public class Select extends Query {
     }
 
     @Override
-    public int getType() {
-        return CommandInterface.SELECT;
-    }
-
-    @Override
     public boolean allowGlobalConditions() {
-        if (offsetExpr == null && (limitExpr == null || sort == null)) {
-            return true;
-        }
-        return false;
+        return offsetExpr == null && (limitExpr == null || sort == null);
     }
 
     public SortOrder getSortOrder() {
@@ -1451,12 +1690,13 @@ public class Select extends Query {
         protected Value[] fetchNextRow() {
             while ((sampleSize <= 0 || rowNumber < sampleSize) &&
                     topTableFilter.next()) {
-                setCurrentRowNumber(++rowNumber);
+                setCurrentRowNumber(rowNumber + 1);
                 if (isConditionMet()) {
+                    ++rowNumber;
                     Value[] row = new Value[columnCount];
                     for (int i = 0; i < columnCount; i++) {
                         Expression expr = expressions.get(i);
-                        row[i] = expr.getValue(session);
+                        row[i] = expr.getValue(getSession());
                     }
                     return row;
                 }
@@ -1470,17 +1710,24 @@ public class Select extends Query {
      */
     private final class LazyResultGroupSorted extends LazyResultSelect {
 
-        Value[] previousKeyValues;
+        private Value[] previousKeyValues;
 
         LazyResultGroupSorted(Expression[] expressions, int columnCount) {
             super(expressions, columnCount);
-            currentGroup = null;
+            if (groupData == null) {
+                groupData = SelectGroups.getInstance(getSession(), Select.this.expressions, isGroupQuery, groupIndex);
+            } else {
+                // TODO is this branch possible?
+                updateAgg(columnCount, Aggregate.STAGE_RESET);
+                groupData.resetLazy();
+            }
         }
 
         @Override
         public void reset() {
             super.reset();
-            currentGroup = null;
+            groupData.resetLazy();
+            previousKeyValues = null;
         }
 
         @Override
@@ -1494,26 +1741,20 @@ public class Select extends Query {
                     for (int i = 0; i < groupIndex.length; i++) {
                         int idx = groupIndex[i];
                         Expression expr = expressions.get(idx);
-                        keyValues[i] = expr.getValue(session);
+                        keyValues[i] = expr.getValue(getSession());
                     }
 
                     Value[] row = null;
                     if (previousKeyValues == null) {
                         previousKeyValues = keyValues;
-                        currentGroup = New.hashMap();
+                        groupData.nextLazyGroup();
                     } else if (!Arrays.equals(previousKeyValues, keyValues)) {
                         row = createGroupSortedRow(previousKeyValues, columnCount);
                         previousKeyValues = keyValues;
-                        currentGroup = New.hashMap();
+                        groupData.nextLazyGroup();
                     }
-                    currentGroupRowId++;
-
-                    for (int i = 0; i < columnCount; i++) {
-                        if (groupByExpression == null || !groupByExpression[i]) {
-                            Expression expr = expressions.get(i);
-                            expr.updateAggregate(session);
-                        }
-                    }
+                    groupData.nextLazyRow();
+                    updateAgg(columnCount, Aggregate.STAGE_GROUP);
                     if (row != null) {
                         return row;
                     }

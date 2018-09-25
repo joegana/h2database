@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -7,6 +7,8 @@ package org.h2.command.dml;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Objects;
+
 import org.h2.api.ErrorCode;
 import org.h2.api.Trigger;
 import org.h2.command.CommandInterface;
@@ -14,7 +16,6 @@ import org.h2.command.Prepared;
 import org.h2.engine.Right;
 import org.h2.engine.Session;
 import org.h2.expression.Expression;
-import org.h2.expression.ExpressionVisitor;
 import org.h2.expression.Parameter;
 import org.h2.expression.ValueExpression;
 import org.h2.message.DbException;
@@ -25,9 +26,9 @@ import org.h2.table.Column;
 import org.h2.table.PlanItem;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
-import org.h2.util.New;
 import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
+import org.h2.util.Utils;
 import org.h2.value.Value;
 import org.h2.value.ValueNull;
 
@@ -38,24 +39,34 @@ import org.h2.value.ValueNull;
 public class Update extends Prepared {
 
     private Expression condition;
-    private TableFilter tableFilter;
+    private TableFilter targetTableFilter;// target of update
+    /**
+     * This table filter is for MERGE..USING support - not used in stand-alone DML
+     */
+    private TableFilter sourceTableFilter;
 
     /** The limit expression as specified in the LIMIT clause. */
     private Expression limitExpr;
 
-    private final ArrayList<Column> columns = New.arrayList();
-    private final HashMap<Column, Expression> expressionMap  = New.hashMap();
+    private boolean updateToCurrentValuesReturnsZero;
+
+    private final ArrayList<Column> columns = Utils.newSmallArrayList();
+    private final HashMap<Column, Expression> expressionMap  = new HashMap<>();
 
     public Update(Session session) {
         super(session);
     }
 
     public void setTableFilter(TableFilter tableFilter) {
-        this.tableFilter = tableFilter;
+        this.targetTableFilter = tableFilter;
     }
 
     public void setCondition(Expression condition) {
         this.condition = condition;
+    }
+
+    public Expression getCondition( ) {
+        return this.condition;
     }
 
     /**
@@ -79,11 +90,11 @@ public class Update extends Prepared {
 
     @Override
     public int update() {
-        tableFilter.startQuery(session);
-        tableFilter.reset();
+        targetTableFilter.startQuery(session);
+        targetTableFilter.reset();
         RowList rows = new RowList(session);
         try {
-            Table table = tableFilter.getTable();
+            Table table = targetTableFilter.getTable();
             session.getUser().checkRight(table, Right.UPDATE);
             table.fire(session, Trigger.UPDATE, true);
             table.lock(session, true, false);
@@ -99,28 +110,53 @@ public class Update extends Prepared {
                     limitRows = v.getInt();
                 }
             }
-            while (tableFilter.next()) {
+            while (targetTableFilter.next()) {
                 setCurrentRowNumber(count+1);
                 if (limitRows >= 0 && count >= limitRows) {
                     break;
                 }
-                if (condition == null ||
-                        Boolean.TRUE.equals(condition.getBooleanValue(session))) {
-                    Row oldRow = tableFilter.get();
+                if (condition == null || condition.getBooleanValue(session)) {
+                    Row oldRow = targetTableFilter.get();
                     Row newRow = table.getTemplateRow();
+                    boolean setOnUpdate = false;
                     for (int i = 0; i < columnCount; i++) {
                         Expression newExpr = expressionMap.get(columns[i]);
+                        Column column = table.getColumn(i);
                         Value newValue;
                         if (newExpr == null) {
+                            if (column.getOnUpdateExpression() != null) {
+                                setOnUpdate = true;
+                            }
                             newValue = oldRow.getValue(i);
                         } else if (newExpr == ValueExpression.getDefault()) {
-                            Column column = table.getColumn(i);
                             newValue = table.getDefaultValue(session, column);
                         } else {
-                            Column column = table.getColumn(i);
-                            newValue = column.convert(newExpr.getValue(session));
+                            newValue = column.convert(newExpr.getValue(session), session.getDatabase().getMode());
                         }
                         newRow.setValue(i, newValue);
+                    }
+                    newRow.setKey(oldRow.getKey());
+                    if (setOnUpdate || updateToCurrentValuesReturnsZero) {
+                        setOnUpdate = false;
+                        for (int i = 0; i < columnCount; i++) {
+                            // Use equals here to detect changes from numeric 0 to 0.0 and similar
+                            if (!Objects.equals(oldRow.getValue(i), newRow.getValue(i))) {
+                                setOnUpdate = true;
+                                break;
+                            }
+                        }
+                        if (setOnUpdate) {
+                            for (int i = 0; i < columnCount; i++) {
+                                if (expressionMap.get(columns[i]) == null) {
+                                    Column column = table.getColumn(i);
+                                    if (column.getOnUpdateExpression() != null) {
+                                        newRow.setValue(i, table.getOnUpdateValue(session, column));
+                                    }
+                                }
+                            }
+                        } else if (updateToCurrentValuesReturnsZero) {
+                            count--;
+                        }
                     }
                     table.validateConvertUpdateSequence(session, newRow);
                     boolean done = false;
@@ -161,9 +197,8 @@ public class Update extends Prepared {
     @Override
     public String getPlanSQL() {
         StatementBuilder buff = new StatementBuilder("UPDATE ");
-        buff.append(tableFilter.getPlanSQL(false)).append("\nSET\n    ");
-        for (int i = 0, size = columns.size(); i < size; i++) {
-            Column c = columns.get(i);
+        buff.append(targetTableFilter.getPlanSQL(false)).append("\nSET\n    ");
+        for (Column c : columns) {
             Expression e = expressionMap.get(c);
             buff.appendExceptFirst(",\n    ");
             buff.append(c.getName()).append(" = ").append(e.getSQL());
@@ -181,21 +216,29 @@ public class Update extends Prepared {
     @Override
     public void prepare() {
         if (condition != null) {
-            condition.mapColumns(tableFilter, 0);
+            condition.mapColumns(targetTableFilter, 0, Expression.MAP_INITIAL);
             condition = condition.optimize(session);
-            condition.createIndexConditions(session, tableFilter);
+            condition.createIndexConditions(session, targetTableFilter);
         }
-        for (int i = 0, size = columns.size(); i < size; i++) {
-            Column c = columns.get(i);
+        for (Column c : columns) {
             Expression e = expressionMap.get(c);
-            e.mapColumns(tableFilter, 0);
+            e.mapColumns(targetTableFilter, 0, Expression.MAP_INITIAL);
+            if (sourceTableFilter!=null){
+                e.mapColumns(sourceTableFilter, 0, Expression.MAP_INITIAL);
+            }
             expressionMap.put(c, e.optimize(session));
         }
-        TableFilter[] filters = new TableFilter[] { tableFilter };
-        PlanItem item = tableFilter.getBestPlanItem(session, filters, 0,
-                ExpressionVisitor.allColumnsForTableFilters(filters));
-        tableFilter.setPlanItem(item);
-        tableFilter.prepare();
+        TableFilter[] filters;
+        if(sourceTableFilter==null){
+            filters = new TableFilter[] { targetTableFilter };
+        }
+        else{
+            filters = new TableFilter[] { targetTableFilter, sourceTableFilter };
+        }
+        PlanItem item = targetTableFilter.getBestPlanItem(session, filters, 0,
+                new AllColumnsForPlan(filters));
+        targetTableFilter.setPlanItem(item);
+        targetTableFilter.prepare();
     }
 
     @Override
@@ -222,4 +265,21 @@ public class Update extends Prepared {
         return true;
     }
 
+    public TableFilter getSourceTableFilter() {
+        return sourceTableFilter;
+    }
+
+    public void setSourceTableFilter(TableFilter sourceTableFilter) {
+        this.sourceTableFilter = sourceTableFilter;
+    }
+
+    /**
+     * Sets expected update count for update to current values case.
+     *
+     * @param updateToCurrentValuesReturnsZero if zero should be returned as update
+     *        count if update set row to current values
+     */
+    public void setUpdateToCurrentValuesReturnsZero(boolean updateToCurrentValuesReturnsZero) {
+        this.updateToCurrentValuesReturnsZero = updateToCurrentValuesReturnsZero;
+    }
 }

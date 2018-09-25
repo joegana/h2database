@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -154,9 +154,8 @@ public class PageBtreeLeaf extends PageBtree {
             if (entryCount > 0) {
                 byte[] d = data.getBytes();
                 int dataStart = offsets[entryCount - 1];
-                int dataEnd = offset;
                 System.arraycopy(d, dataStart, d, dataStart - rowLength,
-                        dataEnd - dataStart + rowLength);
+                        offset - dataStart + rowLength);
             }
             index.writeRow(data, offset, row, onlyPosition);
         }
@@ -177,7 +176,7 @@ public class PageBtreeLeaf extends PageBtree {
         written = false;
         changeCount = index.getPageStore().getChangeCount();
         if (entryCount <= 0) {
-            DbException.throwInternalError("" + entryCount);
+            DbException.throwInternalError(Integer.toString(entryCount));
         }
         int startNext = at > 0 ? offsets[at - 1] : index.getPageStore().getPageSize();
         int rowLength = startNext - offsets[at];
@@ -206,7 +205,7 @@ public class PageBtreeLeaf extends PageBtree {
     PageBtree split(int splitPoint) {
         int newPageId = index.getPageStore().allocatePage();
         PageBtreeLeaf p2 = PageBtreeLeaf.create(index, newPageId, parentPageId);
-        for (int i = splitPoint; i < entryCount;) {
+        while (splitPoint < entryCount) {
             p2.addRow(getRow(splitPoint), false);
             removeRow(splitPoint);
         }

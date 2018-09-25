@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -8,10 +8,12 @@ package org.h2.store;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
+
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.command.ddl.CreateTableData;
@@ -22,7 +24,6 @@ import org.h2.engine.SysProperties;
 import org.h2.index.Cursor;
 import org.h2.index.Index;
 import org.h2.index.IndexType;
-import org.h2.index.MultiVersionIndex;
 import org.h2.index.PageBtreeIndex;
 import org.h2.index.PageBtreeLeaf;
 import org.h2.index.PageBtreeNode;
@@ -42,14 +43,12 @@ import org.h2.table.IndexColumn;
 import org.h2.table.RegularTable;
 import org.h2.table.Table;
 import org.h2.table.TableType;
-import org.h2.util.BitField;
 import org.h2.util.Cache;
 import org.h2.util.CacheLRU;
 import org.h2.util.CacheObject;
 import org.h2.util.CacheWriter;
 import org.h2.util.IntArray;
 import org.h2.util.IntIntHashMap;
-import org.h2.util.New;
 import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
 import org.h2.value.CompareMode;
@@ -164,7 +163,7 @@ public class PageStore implements CacheWriter {
     private RegularTable metaTable;
     private PageDataIndex metaIndex;
     private final IntIntHashMap metaRootPageId = new IntIntHashMap();
-    private final HashMap<Integer, PageIndex> metaObjects = New.hashMap();
+    private final HashMap<Integer, PageIndex> metaObjects = new HashMap<>();
     private HashMap<Integer, PageIndex> tempObjects;
 
     /**
@@ -180,8 +179,8 @@ public class PageStore implements CacheWriter {
     /**
      * Each free page is marked with a set bit.
      */
-    private final BitField freed = new BitField();
-    private final ArrayList<PageFreeList> freeLists = New.arrayList();
+    private final BitSet freed = new BitSet();
+    private final ArrayList<PageFreeList> freeLists = new ArrayList<>();
 
     private boolean recordPageReads;
     private ArrayList<Integer> recordedPagesList;
@@ -229,7 +228,7 @@ public class PageStore implements CacheWriter {
      * Start collecting statistics.
      */
     public void statisticsStart() {
-        statistics = New.hashMap();
+        statistics = new HashMap<>();
     }
 
     /**
@@ -360,13 +359,7 @@ public class PageStore implements CacheWriter {
         readVariableHeader();
         log = new PageLog(this);
         log.openForReading(logKey, logFirstTrunkPage, logFirstDataPage);
-        boolean old = database.isMultiVersion();
-        // temporarily disabling multi-version concurrency, because
-        // the multi-version index sometimes compares rows
-        // and the LOB storage is not yet available.
-        database.setMultiVersion(false);
         boolean isEmpty = recover();
-        database.setMultiVersion(old);
         if (!database.isReadOnly()) {
             readMode = true;
             if (!isEmpty || !SysProperties.MODIFY_ON_WRITE || tempObjects != null) {
@@ -415,8 +408,8 @@ public class PageStore implements CacheWriter {
     private void writeBack() {
         ArrayList<CacheObject> list = cache.getAllChanged();
         Collections.sort(list);
-        for (int i = 0, size = list.size(); i < size; i++) {
-            writeBack(list.get(i));
+        for (CacheObject cacheObject : list) {
+            writeBack(cacheObject);
         }
     }
 
@@ -553,7 +546,7 @@ public class PageStore implements CacheWriter {
             writeBack();
             cache.clear();
             ArrayList<Table> tables = database.getAllTablesAndViews(false);
-            recordedPagesList = New.arrayList();
+            recordedPagesList = new ArrayList<>();
             recordedPagesIndex = new IntIntHashMap();
             recordPageReads = true;
             Session sysSession = database.getSystemSession();
@@ -1160,7 +1153,7 @@ public class PageStore implements CacheWriter {
      * @param exclude the exclude list
      * @param after all allocated pages are higher than this page
      */
-    void allocatePages(IntArray list, int pagesToAllocate, BitField exclude,
+    void allocatePages(IntArray list, int pagesToAllocate, BitSet exclude,
             int after) {
         list.ensureCapacity(list.size() + pagesToAllocate);
         for (int i = 0; i < pagesToAllocate; i++) {
@@ -1186,7 +1179,7 @@ public class PageStore implements CacheWriter {
         return pos;
     }
 
-    private int allocatePage(BitField exclude, int first) {
+    private int allocatePage(BitSet exclude, int first) {
         int page;
         for (int i = firstFreeListIndex;; i++) {
             PageFreeList list = getFreeList(i);
@@ -1407,7 +1400,7 @@ public class PageStore implements CacheWriter {
         isEmpty &= log.recover(PageLog.RECOVERY_STAGE_REDO);
         boolean setReadOnly = false;
         if (!database.isReadOnly()) {
-            if (log.getInDoubtTransactions().size() == 0) {
+            if (log.getInDoubtTransactions().isEmpty()) {
                 log.recoverEnd();
                 int firstUncommittedSection = getFirstUncommittedSection();
                 log.removeUntil(firstUncommittedSection);
@@ -1421,7 +1414,7 @@ public class PageStore implements CacheWriter {
             if (index.getTable().isTemporary()) {
                 // temporary indexes are removed after opening
                 if (tempObjects == null) {
-                    tempObjects = New.hashMap();
+                    tempObjects = new HashMap<>();
                 }
                 tempObjects.put(index.getId(), index);
             } else {
@@ -1530,7 +1523,7 @@ public class PageStore implements CacheWriter {
         if (tableId == META_TABLE_ID) {
             int rootPageId = row.getValue(3).getInt();
             if (reservedPages == null) {
-                reservedPages = New.hashMap();
+                reservedPages = new HashMap<>();
             }
             reservedPages.put(rootPageId, logPos);
         }
@@ -1722,8 +1715,7 @@ public class PageStore implements CacheWriter {
                     ic.sortType = Integer.parseInt(s);
                     c = c.substring(0, idx);
                 }
-                Column column = tableCols[Integer.parseInt(c)];
-                ic.column = column;
+                ic.column = tableCols[Integer.parseInt(c)];
                 cols[i] = ic;
             }
             IndexType indexType;
@@ -1738,13 +1730,7 @@ public class PageStore implements CacheWriter {
             }
             meta = table.addIndex(session, "I" + id, id, cols, indexType, false, null);
         }
-        PageIndex index;
-        if (meta instanceof MultiVersionIndex) {
-            index = (PageIndex) ((MultiVersionIndex) meta).getBaseIndex();
-        } else {
-            index = (PageIndex) meta;
-        }
-        metaObjects.put(id, index);
+        metaObjects.put(id, (PageIndex) meta);
     }
 
     /**
@@ -1980,18 +1966,14 @@ public class PageStore implements CacheWriter {
      * @return true if it is correct
      */
     public static boolean checksumTest(byte[] d, int pageId, int pageSize) {
-        int ps = pageSize;
         int s1 = 255 + (d[0] & 255), s2 = 255 + s1;
         s2 += s1 += d[6] & 255;
-        s2 += s1 += d[(ps >> 1) - 1] & 255;
-        s2 += s1 += d[ps >> 1] & 255;
-        s2 += s1 += d[ps - 2] & 255;
-        s2 += s1 += d[ps - 1] & 255;
-        if (d[1] != (byte) (((s1 & 255) + (s1 >> 8)) ^ pageId)
-                || d[2] != (byte) (((s2 & 255) + (s2 >> 8)) ^ (pageId >> 8))) {
-            return false;
-        }
-        return true;
+        s2 += s1 += d[(pageSize >> 1) - 1] & 255;
+        s2 += s1 += d[pageSize >> 1] & 255;
+        s2 += s1 += d[pageSize - 2] & 255;
+        s2 += s1 += d[pageSize - 1] & 255;
+        return d[1] == (byte) (((s1 & 255) + (s1 >> 8)) ^ pageId) && d[2] == (byte) (((s2 & 255) + (s2 >> 8)) ^ (pageId
+                >> 8));
     }
 
     /**
@@ -2025,8 +2007,8 @@ public class PageStore implements CacheWriter {
         this.lockFile = lockFile;
     }
 
-    public BitField getObjectIds() {
-        BitField f = new BitField();
+    public BitSet getObjectIds() {
+        BitSet f = new BitSet();
         Cursor cursor = metaIndex.find(pageStoreSession, null, null);
         while (cursor.next()) {
             Row row = cursor.get();

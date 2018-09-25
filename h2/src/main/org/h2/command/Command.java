@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
@@ -7,6 +7,8 @@ package org.h2.command;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
+
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
@@ -15,6 +17,7 @@ import org.h2.expression.ParameterInterface;
 import org.h2.message.DbException;
 import org.h2.message.Trace;
 import org.h2.result.ResultInterface;
+import org.h2.result.ResultWithGeneratedKeys;
 import org.h2.util.MathUtils;
 
 /**
@@ -45,8 +48,8 @@ public abstract class Command implements CommandInterface {
 
     private boolean canReuse;
 
-    Command(Parser parser, String sql) {
-        this.session = parser.getSession();
+    Command(Session session, String sql) {
+        this.session = session;
         this.sql = sql;
         trace = session.getDatabase().getTrace(Trace.COMMAND);
     }
@@ -148,20 +151,15 @@ public abstract class Command implements CommandInterface {
 
     @Override
     public void stop() {
-        session.endStatement();
-        session.setCurrentCommand(null);
+        session.setCurrentCommand(null, false);
         if (!isTransactional()) {
             session.commit(true);
         } else if (session.getAutoCommit()) {
             session.commit(false);
-        } else if (session.getDatabase().isMultiThreaded()) {
-            Database db = session.getDatabase();
-            if (db != null) {
-                if (db.getLockMode() == Constants.LOCK_MODE_READ_COMMITTED) {
-                    session.unlockReadLocks();
-                }
-            }
+        } else {
+            session.unlockReadLocks();
         }
+        session.endStatement();
         if (trace.isInfoEnabled() && startTimeNanos > 0) {
             long timeMillis = (System.nanoTime() - startTimeNanos) / 1000 / 1000;
             if (timeMillis > Constants.SLOW_QUERY_LIMIT_MS) {
@@ -183,7 +181,7 @@ public abstract class Command implements CommandInterface {
         startTimeNanos = 0;
         long start = 0;
         Database database = session.getDatabase();
-        Object sync = database.isMultiThreaded() ? (Object) session : (Object) database;
+        Object sync = database.isMultiThreaded() || database.getStore() != null ? session : database;
         session.waitIfExclusiveModeEnabled();
         boolean callStop = true;
         boolean writing = !isReadOnly();
@@ -192,8 +190,10 @@ public abstract class Command implements CommandInterface {
                 // wait
             }
         }
+        //noinspection SynchronizationOnLocalVariableOrMethodParameter
         synchronized (sync) {
-            session.setCurrentCommand(this);
+            session.startStatementWithinTransaction();
+            session.setCurrentCommand(this, false);
             try {
                 while (true) {
                     database.checkPowerOff();
@@ -238,10 +238,10 @@ public abstract class Command implements CommandInterface {
     }
 
     @Override
-    public int executeUpdate() {
+    public ResultWithGeneratedKeys executeUpdate(Object generatedKeysRequest) {
         long start = 0;
         Database database = session.getDatabase();
-        Object sync = database.isMultiThreaded() ? (Object) session : (Object) database;
+        Object sync = database.isMultiThreaded() || database.getStore() != null ? session : database;
         session.waitIfExclusiveModeEnabled();
         boolean callStop = true;
         boolean writing = !isReadOnly();
@@ -250,14 +250,22 @@ public abstract class Command implements CommandInterface {
                 // wait
             }
         }
+        //noinspection SynchronizationOnLocalVariableOrMethodParameter
         synchronized (sync) {
             Session.Savepoint rollback = session.setSavepoint();
-            session.setCurrentCommand(this);
+            session.startStatementWithinTransaction();
+            session.setCurrentCommand(this, generatedKeysRequest);
+            DbException ex = null;
             try {
                 while (true) {
                     database.checkPowerOff();
                     try {
-                        return update();
+                        int updateCount = update();
+                        if (!Boolean.FALSE.equals(generatedKeysRequest)) {
+                            return new ResultWithGeneratedKeys.WithKeys(updateCount,
+                                    session.getGeneratedKeys().getKeys(session));
+                        }
+                        return ResultWithGeneratedKeys.of(updateCount);
                     } catch (DbException e) {
                         start = filterConcurrentUpdate(e, start);
                     } catch (OutOfMemoryError e) {
@@ -277,17 +285,28 @@ public abstract class Command implements CommandInterface {
                     database.shutdownImmediately();
                     throw e;
                 }
-                database.checkPowerOff();
-                if (s.getErrorCode() == ErrorCode.DEADLOCK_1) {
-                    session.rollback();
-                } else {
-                    session.rollbackTo(rollback, false);
+                try {
+                    database.checkPowerOff();
+                    if (s.getErrorCode() == ErrorCode.DEADLOCK_1) {
+                        session.rollback();
+                    } else {
+                        session.rollbackTo(rollback);
+                    }
+                } catch (Throwable nested) {
+                    e.addSuppressed(nested);
                 }
+                ex = e;
                 throw e;
             } finally {
                 try {
                     if (callStop) {
                         stop();
+                    }
+                } catch (Throwable nested) {
+                    if (ex == null) {
+                        throw nested;
+                    } else {
+                        ex.addSuppressed(nested);
                     }
                 } finally {
                     if (writing) {
@@ -305,25 +324,30 @@ public abstract class Command implements CommandInterface {
                 errorCode != ErrorCode.ROW_NOT_FOUND_WHEN_DELETING_1) {
             throw e;
         }
-        long now = System.nanoTime() / 1000000;
-        if (start != 0 && now - start > session.getLockTimeout()) {
-            throw DbException.get(ErrorCode.LOCK_TIMEOUT_1, e.getCause(), "");
+        long now = System.nanoTime();
+        if (start != 0 && TimeUnit.NANOSECONDS.toMillis(now - start) > session.getLockTimeout()) {
+            throw DbException.get(ErrorCode.LOCK_TIMEOUT_1, e);
         }
+        // Only in PageStore mode we need to sleep here to avoid busy wait loop
         Database database = session.getDatabase();
-        int sleep = 1 + MathUtils.randomInt(10);
-        while (true) {
-            try {
-                if (database.isMultiThreaded()) {
-                    Thread.sleep(sleep);
-                } else {
-                    database.wait(sleep);
+        if (database.getStore() == null) {
+            int sleep = 1 + MathUtils.randomInt(10);
+            while (true) {
+                try {
+                    if (database.isMultiThreaded()) {
+                        Thread.sleep(sleep);
+                    } else {
+                        // although nobody going to notify us
+                        // it is vital to give up lock on a database
+                        database.wait(sleep);
+                    }
+                } catch (InterruptedException e1) {
+                    // ignore
                 }
-            } catch (InterruptedException e1) {
-                // ignore
-            }
-            long slept = System.nanoTime() / 1000000 - now;
-            if (slept >= sleep) {
-                break;
+                long slept = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - now);
+                if (slept >= sleep) {
+                    break;
+                }
             }
         }
         return start == 0 ? now : start;
@@ -364,8 +388,7 @@ public abstract class Command implements CommandInterface {
     public void reuse() {
         canReuse = false;
         ArrayList<? extends ParameterInterface> parameters = getParameters();
-        for (int i = 0, size = parameters.size(); i < size; i++) {
-            ParameterInterface param = parameters.get(i);
+        for (ParameterInterface param : parameters) {
             param.setValue(null, true);
         }
     }

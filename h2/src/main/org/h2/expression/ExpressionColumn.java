@@ -1,14 +1,14 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
  * and the EPL 1.0 (http://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression;
 
-import java.util.HashMap;
 import org.h2.api.ErrorCode;
 import org.h2.command.Parser;
 import org.h2.command.dml.Select;
+import org.h2.command.dml.SelectGroups;
 import org.h2.command.dml.SelectListColumnResolver;
 import org.h2.engine.Database;
 import org.h2.engine.Session;
@@ -20,9 +20,10 @@ import org.h2.table.Column;
 import org.h2.table.ColumnResolver;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
+import org.h2.value.ExtTypeInfo;
 import org.h2.value.Value;
 import org.h2.value.ValueBoolean;
-import org.h2.value.ValueEnum;
+import org.h2.value.ValueNull;
 
 /**
  * A expression that represents a column of a table or view.
@@ -36,7 +37,6 @@ public class ExpressionColumn extends Expression {
     private ColumnResolver columnResolver;
     private int queryLevel;
     private Column column;
-    private boolean evaluatable;
 
     public ExpressionColumn(Database database, Column column) {
         this.database = database;
@@ -79,7 +79,7 @@ public class ExpressionColumn extends Expression {
     }
 
     @Override
-    public void mapColumns(ColumnResolver resolver, int level) {
+    public void mapColumns(ColumnResolver resolver, int level, int state) {
         if (tableAlias != null && !database.equalsIdentifiers(
                 tableAlias, resolver.getTableAlias())) {
             return;
@@ -89,7 +89,10 @@ public class ExpressionColumn extends Expression {
             return;
         }
         for (Column col : resolver.getColumns()) {
-            String n = col.getName();
+            String n = resolver.getDerivedColumnName(col);
+            if (n == null) {
+                n = col.getName();
+            }
             if (database.equalsIdentifiers(columnName, n)) {
                 mapColumn(resolver, col, level);
                 return;
@@ -150,22 +153,21 @@ public class ExpressionColumn extends Expression {
     }
 
     @Override
-    public void updateAggregate(Session session) {
-        Value now = columnResolver.getValue(column);
+    public void updateAggregate(Session session, int stage) {
         Select select = columnResolver.getSelect();
         if (select == null) {
             throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
         }
-        HashMap<Expression, Object> values = select.getCurrentGroup();
-        if (values == null) {
+        SelectGroups groupData = select.getGroupDataIfCurrent(false);
+        if (groupData == null) {
             // this is a different level (the enclosing query)
             return;
         }
-        Value v = (Value) values.get(this);
+        Value v = (Value) groupData.getCurrentGroupExprData(this);
         if (v == null) {
-            values.put(this, now);
-        } else {
-            if (!database.areEqual(now, v)) {
+            groupData.setCurrentGroupExprData(this, columnResolver.getValue(column));
+        } else if (!select.isGroupWindowStage2()) {
+            if (!database.areEqual(columnResolver.getValue(column), v)) {
                 throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
             }
         }
@@ -175,35 +177,41 @@ public class ExpressionColumn extends Expression {
     public Value getValue(Session session) {
         Select select = columnResolver.getSelect();
         if (select != null) {
-            HashMap<Expression, Object> values = select.getCurrentGroup();
-            if (values != null) {
-                Value v = (Value) values.get(this);
+            SelectGroups groupData = select.getGroupDataIfCurrent(false);
+            if (groupData != null) {
+                Value v = (Value) groupData.getCurrentGroupExprData(this);
                 if (v != null) {
                     return v;
+                }
+                if (select.isGroupWindowStage2()) {
+                    throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
                 }
             }
         }
         Value value = columnResolver.getValue(column);
         if (value == null) {
-            columnResolver.getValue(column);
-            throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
+            if (select == null) {
+                throw DbException.get(ErrorCode.NULL_NOT_ALLOWED, getSQL());
+            } else {
+                throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
+            }
         }
-        if (column.getEnumerators() != null) {
-            return ValueEnum.get(column.getEnumerators(), value.getInt());
+        if (value != ValueNull.INSTANCE) {
+            ExtTypeInfo extTypeInfo = column.getExtTypeInfo();
+            if (extTypeInfo != null) {
+                return extTypeInfo.cast(value);
+            }
         }
         return value;
     }
 
     @Override
     public int getType() {
-        return column.getType();
+        return column == null ? Value.UNKNOWN : column.getType();
     }
 
     @Override
     public void setEvaluatable(TableFilter tableFilter, boolean b) {
-        if (columnResolver != null && tableFilter == columnResolver.getTableFilter()) {
-            evaluatable = b;
-        }
     }
 
     public Column getColumn() {
@@ -253,6 +261,12 @@ public class ExpressionColumn extends Expression {
     @Override
     public String getAlias() {
         if (column != null) {
+            if (columnResolver != null) {
+                String name = columnResolver.getDerivedColumnName(column);
+                if (name != null) {
+                    return name;
+                }
+            }
             return column.getName();
         }
         if (tableAlias != null) {
@@ -283,19 +297,15 @@ public class ExpressionColumn extends Expression {
         case ExpressionVisitor.INDEPENDENT:
             return this.queryLevel < visitor.getQueryLevel();
         case ExpressionVisitor.EVALUATABLE:
-            // if the current value is known (evaluatable set)
-            // or if this columns belongs to a 'higher level' query and is
+            // if this column belongs to a 'higher level' query and is
             // therefore just a parameter
-            if (database.getSettings().nestedJoins) {
-                if (visitor.getQueryLevel() < this.queryLevel) {
-                    return true;
-                }
-                if (getTableFilter() == null) {
-                    return false;
-                }
-                return getTableFilter().isEvaluatable();
+            if (visitor.getQueryLevel() < this.queryLevel) {
+                return true;
             }
-            return evaluatable || visitor.getQueryLevel() < this.queryLevel;
+            if (getTableFilter() == null) {
+                return false;
+            }
+            return getTableFilter().isEvaluatable();
         case ExpressionVisitor.SET_MAX_DATA_MODIFICATION_ID:
             visitor.addDataModificationId(column.getTable().getMaxDataModificationId());
             return true;
@@ -306,8 +316,11 @@ public class ExpressionColumn extends Expression {
                 visitor.addDependency(column.getTable());
             }
             return true;
-        case ExpressionVisitor.GET_COLUMNS:
-            visitor.addColumn(column);
+        case ExpressionVisitor.GET_COLUMNS1:
+            visitor.addColumn1(column);
+            return true;
+        case ExpressionVisitor.GET_COLUMNS2:
+            visitor.addColumn2(column);
             return true;
         default:
             throw DbException.throwInternalError("type=" + visitor.getType());
@@ -325,7 +338,7 @@ public class ExpressionColumn extends Expression {
         if (filter == tf && column.getType() == Value.BOOLEAN) {
             IndexCondition cond = IndexCondition.get(
                     Comparison.EQUAL, this, ValueExpression.get(
-                            ValueBoolean.get(true)));
+                            ValueBoolean.TRUE));
             filter.addIndexCondition(cond);
         }
     }
@@ -333,7 +346,7 @@ public class ExpressionColumn extends Expression {
     @Override
     public Expression getNotIfPossible(Session session) {
         return new Comparison(session, Comparison.EQUAL, this,
-                ValueExpression.get(ValueBoolean.get(false)));
+                ValueExpression.get(ValueBoolean.FALSE));
     }
 
 }
