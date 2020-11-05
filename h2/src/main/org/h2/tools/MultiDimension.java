@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.tools;
@@ -9,7 +9,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import org.h2.util.StringUtils;
 
@@ -156,12 +155,13 @@ public class MultiDimension implements Comparator<long[]> {
     public String generatePreparedQuery(String table, String scalarColumn,
             String[] columns) {
         StringBuilder buff = new StringBuilder("SELECT D.* FROM ");
-        buff.append(StringUtils.quoteIdentifier(table)).
-            append(" D, TABLE(_FROM_ BIGINT=?, _TO_ BIGINT=?) WHERE ").
-            append(StringUtils.quoteIdentifier(scalarColumn)).
+        StringUtils.quoteIdentifier(buff, table).
+            append(" D, TABLE(_FROM_ BIGINT=?, _TO_ BIGINT=?) WHERE ");
+        StringUtils.quoteIdentifier(buff, scalarColumn).
             append(" BETWEEN _FROM_ AND _TO_");
         for (String col : columns) {
-            buff.append(" AND ").append(StringUtils.quoteIdentifier(col)).
+            buff.append(" AND ");
+            StringUtils.quoteIdentifier(buff, col).
                 append("+1 BETWEEN ?+1 AND ?+1");
         }
         return buff.toString();
@@ -240,7 +240,7 @@ public class MultiDimension implements Comparator<long[]> {
      * @param total product of the gap lengths
      */
     private void combineEntries(ArrayList<long[]> list, int total) {
-        Collections.sort(list, this);
+        list.sort(this);
         for (int minGap = 10; minGap < total; minGap += minGap / 2) {
             for (int i = 0; i < list.size() - 1; i++) {
                 long[] current = list.get(i);

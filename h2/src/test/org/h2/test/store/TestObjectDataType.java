@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.store;
@@ -28,7 +28,7 @@ public class TestObjectDataType extends TestBase {
      * @param a ignored
      */
     public static void main(String... a) throws Exception {
-        TestBase.createCaller().init().test();
+        TestBase.createCaller().init().testFromMain();
     }
 
     @Override
@@ -106,7 +106,6 @@ public class TestObjectDataType extends TestBase {
             if (last != null) {
                 int comp = ot.compare(x, last);
                 if (comp <= 0) {
-                    ot.compare(x, last);
                     fail(x.getClass().getSimpleName() + ": " +
                             x.toString() + " " + comp);
                 }

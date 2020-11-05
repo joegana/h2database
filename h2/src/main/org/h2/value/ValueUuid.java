@@ -1,15 +1,14 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
 
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
 import java.util.UUID;
 
 import org.h2.api.ErrorCode;
+import org.h2.engine.CastDataProvider;
 import org.h2.message.DbException;
 import org.h2.util.Bits;
 import org.h2.util.MathUtils;
@@ -18,18 +17,18 @@ import org.h2.util.StringUtils;
 /**
  * Implementation of the UUID data type.
  */
-public class ValueUuid extends Value {
+public final class ValueUuid extends Value {
 
     /**
      * The precision of this value in number of bytes.
      */
-    private static final int PRECISION = 16;
+    static final int PRECISION = 16;
 
     /**
      * The display size of the textual representation of a UUID.
      * Example: cd38d882-7ada-4589-b5fb-7da0ca559d9a
      */
-    private static final int DISPLAY_SIZE = 36;
+    static final int DISPLAY_SIZE = 36;
 
     private final long high, low;
 
@@ -61,16 +60,15 @@ public class ValueUuid extends Value {
     /**
      * Get or create a UUID for the given 16 bytes.
      *
-     * @param binary the byte array (must be at least 16 bytes long)
+     * @param binary the byte array
      * @return the UUID
      */
     public static ValueUuid get(byte[] binary) {
-        if (binary.length < 16) {
-            return get(StringUtils.convertBytesToHex(binary));
+        int length = binary.length;
+        if (length != 16) {
+            throw DbException.get(ErrorCode.DATA_CONVERSION_ERROR_1, "UUID requires 16 bytes, got " + length);
         }
-        long high = Bits.readLong(binary, 0);
-        long low = Bits.readLong(binary, 8);
-        return (ValueUuid) Value.cache(new ValueUuid(high, low));
+        return get(Bits.readLong(binary, 0), Bits.readLong(binary, 8));
     }
 
     /**
@@ -102,86 +100,56 @@ public class ValueUuid extends Value {
      */
     public static ValueUuid get(String s) {
         long low = 0, high = 0;
-        for (int i = 0, j = 0, length = s.length(); i < length; i++) {
+        int j = 0;
+        for (int i = 0, length = s.length(); i < length; i++) {
             char c = s.charAt(i);
             if (c >= '0' && c <= '9') {
                 low = (low << 4) | (c - '0');
             } else if (c >= 'a' && c <= 'f') {
-                low = (low << 4) | (c - 'a' + 0xa);
+                low = (low << 4) | (c - ('a' - 0xa));
             } else if (c == '-') {
                 continue;
             } else if (c >= 'A' && c <= 'F') {
-                low = (low << 4) | (c - 'A' + 0xa);
+                low = (low << 4) | (c - ('A' - 0xa));
             } else if (c <= ' ') {
                 continue;
             } else {
                 throw DbException.get(ErrorCode.DATA_CONVERSION_ERROR_1, s);
             }
-            if (j++ == 15) {
+            if (++j == 16) {
                 high = low;
                 low = 0;
             }
         }
-        return (ValueUuid) Value.cache(new ValueUuid(high, low));
-    }
-
-    @Override
-    public String getSQL() {
-        return StringUtils.quoteStringSQL(getString());
-    }
-
-    @Override
-    public int getType() {
-        return Value.UUID;
-    }
-
-    @Override
-    public long getPrecision() {
-        return PRECISION;
-    }
-
-    private static void appendHex(StringBuilder buff, long x, int bytes) {
-        for (int i = bytes * 8 - 4; i >= 0; i -= 8) {
-            buff.append(Integer.toHexString((int) (x >> i) & 0xf)).
-                append(Integer.toHexString((int) (x >> (i - 4)) & 0xf));
+        if (j != 32) {
+            throw DbException.get(ErrorCode.DATA_CONVERSION_ERROR_1, s);
         }
+        return get(high, low);
+    }
+
+    @Override
+    public StringBuilder getSQL(StringBuilder builder, int sqlFlags) {
+        return addString(builder.append("UUID '")).append('\'');
+    }
+
+    @Override
+    public TypeInfo getType() {
+        return TypeInfo.TYPE_UUID;
+    }
+
+    @Override
+    public int getMemory() {
+        return 32;
+    }
+
+    @Override
+    public int getValueType() {
+        return UUID;
     }
 
     @Override
     public String getString() {
-        StringBuilder buff = new StringBuilder(36);
-        appendHex(buff, high >> 32, 4);
-        buff.append('-');
-        appendHex(buff, high >> 16, 2);
-        buff.append('-');
-        appendHex(buff, high, 2);
-        buff.append('-');
-        appendHex(buff, low >> 48, 2);
-        buff.append('-');
-        appendHex(buff, low, 6);
-        return buff.toString();
-    }
-
-    @Override
-    public int compareTypeSafe(Value o, CompareMode mode) {
-        if (o == this) {
-            return 0;
-        }
-        ValueUuid v = (ValueUuid) o;
-        if (high == v.high) {
-            return Long.compare(low, v.low);
-        }
-        return high > v.high ? 1 : -1;
-    }
-
-    @Override
-    public boolean equals(Object other) {
-        return other instanceof ValueUuid && compareTypeSafe((Value) other, null) == 0;
-    }
-
-    @Override
-    public Object getObject() {
-        return new UUID(high, low);
+        return addString(new StringBuilder(36)).toString();
     }
 
     @Override
@@ -189,10 +157,40 @@ public class ValueUuid extends Value {
         return Bits.uuidToBytes(high, low);
     }
 
+    private StringBuilder addString(StringBuilder builder) {
+        StringUtils.appendHex(builder, high >> 32, 4).append('-');
+        StringUtils.appendHex(builder, high >> 16, 2).append('-');
+        StringUtils.appendHex(builder, high, 2).append('-');
+        StringUtils.appendHex(builder, low >> 48, 2).append('-');
+        return StringUtils.appendHex(builder, low, 6);
+    }
+
     @Override
-    public void set(PreparedStatement prep, int parameterIndex)
-            throws SQLException {
-        prep.setBytes(parameterIndex, getBytes());
+    public int compareTypeSafe(Value o, CompareMode mode, CastDataProvider provider) {
+        if (o == this) {
+            return 0;
+        }
+        ValueUuid v = (ValueUuid) o;
+        int cmp = Long.compareUnsigned(high, v.high);
+        return cmp != 0 ? cmp : Long.compareUnsigned(low, v.low);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (!(other instanceof ValueUuid)) {
+            return false;
+        }
+        ValueUuid v = (ValueUuid) other;
+        return high == v.high && low == v.low;
+    }
+
+    /**
+     * Returns the UUID.
+     *
+     * @return the UUID
+     */
+    public UUID getUuid() {
+        return new UUID(high, low);
     }
 
     /**
@@ -214,8 +212,13 @@ public class ValueUuid extends Value {
     }
 
     @Override
-    public int getDisplaySize() {
+    public long charLength() {
         return DISPLAY_SIZE;
+    }
+
+    @Override
+    public long octetLength() {
+        return PRECISION;
     }
 
 }

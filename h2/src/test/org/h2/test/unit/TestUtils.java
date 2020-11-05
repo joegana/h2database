@@ -1,22 +1,18 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.unit;
 
 import java.io.ByteArrayInputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.io.StringReader;
 import java.math.BigInteger;
-import java.sql.Timestamp;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.Date;
 import java.util.Random;
 import org.h2.test.TestBase;
 import org.h2.util.Bits;
@@ -39,7 +35,7 @@ public class TestUtils extends TestBase {
      * @param a ignored
      */
     public static void main(String... a) throws Exception {
-        TestBase.createCaller().init().test();
+        TestBase.createCaller().init().testFromMain();
     }
 
     @Override
@@ -152,12 +148,7 @@ public class TestUtils extends TestBase {
     }
 
     private void testSortTopN() {
-        Comparator<Integer> comp = new Comparator<Integer>() {
-            @Override
-            public int compare(Integer o1, Integer o2) {
-                return o1.compareTo(o2);
-            }
-        };
+        Comparator<Integer> comp = Comparator.naturalOrder();
         Integer[] arr = new Integer[] {};
         Utils.sortTopN(arr, 0, 5, comp);
 
@@ -172,12 +163,7 @@ public class TestUtils extends TestBase {
 
     private void testSortTopNRandom() {
         Random rnd = new Random();
-        Comparator<Integer> comp = new Comparator<Integer>() {
-            @Override
-            public int compare(Integer o1, Integer o2) {
-                return o1.compareTo(o2);
-            }
-        };
+        Comparator<Integer> comp = Comparator.naturalOrder();
         for (int z = 0; z < 10000; z++) {
             Integer[] arr = new Integer[1 + rnd.nextInt(500)];
             for (int i = 0; i < arr.length; i++) {
@@ -231,35 +217,10 @@ public class TestUtils extends TestBase {
         // Instance methods
         long x = (Long) Utils.callMethod(instance, "longValue");
         assertEquals(10, x);
-        // Static fields
-        String pathSeparator = (String) Utils
-                .getStaticField("java.io.File.pathSeparator");
-        assertEquals(File.pathSeparator, pathSeparator);
         // Instance fields
-        String test = (String) Utils.getField(this, "testField");
-        assertEquals(this.testField, test);
-        // Class present?
-        assertFalse(Utils.isClassPresent("abc"));
-        assertTrue(Utils.isClassPresent(getClass().getName()));
         Utils.callStaticMethod("java.lang.String.valueOf", "a");
         Utils.callStaticMethod("java.awt.AWTKeyStroke.getAWTKeyStroke",
                 'x', java.awt.event.InputEvent.SHIFT_DOWN_MASK);
-        // Common comparable superclass
-        assertFalse(Utils.haveCommonComparableSuperclass(
-                Integer.class,
-                Long.class));
-        assertTrue(Utils.haveCommonComparableSuperclass(
-                Integer.class,
-                Integer.class));
-        assertTrue(Utils.haveCommonComparableSuperclass(
-                Timestamp.class,
-                Date.class));
-        assertFalse(Utils.haveCommonComparableSuperclass(
-                ArrayList.class,
-                Long.class));
-        assertFalse(Utils.haveCommonComparableSuperclass(
-                Integer.class,
-                ArrayList.class));
     }
 
     private void testParseBooleanCheckFalse(String value) {
@@ -308,18 +269,8 @@ public class TestUtils extends TestBase {
         // Test other values
         assertFalse(Utils.parseBoolean("BAD", false, false));
         assertTrue(Utils.parseBoolean("BAD", true, false));
-        try {
-            Utils.parseBoolean("BAD", false, true);
-            fail();
-        } catch (IllegalArgumentException e) {
-            // OK
-        }
-        try {
-            Utils.parseBoolean("BAD", true, true);
-            fail();
-        } catch (IllegalArgumentException e) {
-            // OK
-        }
+        assertThrows(IllegalArgumentException.class, () -> Utils.parseBoolean("BAD", false, true));
+        assertThrows(IllegalArgumentException.class, () -> Utils.parseBoolean("BAD", true, true));
     }
 
 }

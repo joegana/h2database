@@ -1,42 +1,46 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression;
 
-import org.h2.engine.Session;
-import org.h2.table.Column;
+import org.h2.engine.SessionLocal;
 import org.h2.table.ColumnResolver;
 import org.h2.table.TableFilter;
-import org.h2.util.StatementBuilder;
+import org.h2.value.ExtTypeInfoRow;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 import org.h2.value.ValueArray;
+import org.h2.value.ValueRow;
 
 /**
  * A list of expressions, as in (ID, NAME).
- * The result of this expression is an array.
+ * The result of this expression is a row or an array.
  */
-public class ExpressionList extends Expression {
+public final class ExpressionList extends Expression {
 
     private final Expression[] list;
+    private final boolean isArray;
+    private TypeInfo type;
 
-    public ExpressionList(Expression[] list) {
+    public ExpressionList(Expression[] list, boolean isArray) {
         this.list = list;
+        this.isArray = isArray;
     }
 
     @Override
-    public Value getValue(Session session) {
+    public Value getValue(SessionLocal session) {
         Value[] v = new Value[list.length];
         for (int i = 0; i < list.length; i++) {
             v[i] = list[i].getValue(session);
         }
-        return ValueArray.get(v);
+        return isArray ? ValueArray.get((TypeInfo) type.getExtTypeInfo(), v, session) : ValueRow.get(type, v);
     }
 
     @Override
-    public int getType() {
-        return Value.ARRAY;
+    public TypeInfo getType() {
+        return type;
     }
 
     @Override
@@ -47,19 +51,26 @@ public class ExpressionList extends Expression {
     }
 
     @Override
-    public Expression optimize(Session session) {
+    public Expression optimize(SessionLocal session) {
         boolean allConst = true;
-        for (int i = 0; i < list.length; i++) {
+        int count = list.length;
+        for (int i = 0; i < count; i++) {
             Expression e = list[i].optimize(session);
             if (!e.isConstant()) {
                 allConst = false;
             }
             list[i] = e;
         }
+        initializeType();
         if (allConst) {
             return ValueExpression.get(getValue(session));
         }
         return this;
+    }
+
+    void initializeType() {
+        type = isArray ? TypeInfo.getTypeInfo(Value.ARRAY, list.length, 0, TypeInfo.getHigherType(list))
+                : TypeInfo.getTypeInfo(Value.ROW, 0, 0, new ExtTypeInfoRow(list));
     }
 
     @Override
@@ -70,35 +81,14 @@ public class ExpressionList extends Expression {
     }
 
     @Override
-    public int getScale() {
-        return 0;
+    public StringBuilder getUnenclosedSQL(StringBuilder builder, int sqlFlags) {
+        return isArray //
+                ? writeExpressions(builder.append("ARRAY ["), list, sqlFlags).append(']')
+                : writeExpressions(builder.append("ROW ("), list, sqlFlags).append(')');
     }
 
     @Override
-    public long getPrecision() {
-        return Integer.MAX_VALUE;
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return Integer.MAX_VALUE;
-    }
-
-    @Override
-    public String getSQL() {
-        StatementBuilder buff = new StatementBuilder("(");
-        for (Expression e: list) {
-            buff.appendExceptFirst(", ");
-            buff.append(e.getSQL());
-        }
-        if (list.length == 1) {
-            buff.append(',');
-        }
-        return buff.append(')').toString();
-    }
-
-    @Override
-    public void updateAggregate(Session session, int stage) {
+    public void updateAggregate(SessionLocal session, int stage) {
         for (Expression e : list) {
             e.updateAggregate(session, stage);
         }
@@ -124,16 +114,27 @@ public class ExpressionList extends Expression {
     }
 
     @Override
-    public Expression[] getExpressionColumns(Session session) {
-        ExpressionColumn[] expr = new ExpressionColumn[list.length];
-        for (int i = 0; i < list.length; i++) {
-            Expression e = list[i];
-            Column col = new Column("C" + (i + 1),
-                    e.getType(), e.getPrecision(), e.getScale(),
-                    e.getDisplaySize());
-            expr[i] = new ExpressionColumn(session.getDatabase(), col);
+    public boolean isConstant() {
+        for (Expression e : list) {
+            if (!e.isConstant()) {
+                return false;
+            }
         }
-        return expr;
+        return true;
+    }
+
+    @Override
+    public int getSubexpressionCount() {
+        return list.length;
+    }
+
+    @Override
+    public Expression getSubexpression(int index) {
+        return list[index];
+    }
+
+    public boolean isArray() {
+        return isArray;
     }
 
 }

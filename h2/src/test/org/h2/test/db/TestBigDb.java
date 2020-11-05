@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.db;
@@ -27,7 +27,7 @@ public class TestBigDb extends TestDb {
      * @param a ignored
      */
     public static void main(String... a) throws Exception {
-        TestBase.createCaller().init().test();
+        TestBase.createCaller().init().testFromMain();
     }
 
     @Override
@@ -87,8 +87,8 @@ public class TestBigDb extends TestDb {
                 + "STATUS_CODE CHAR(3) DEFAULT SECURE_RAND(1),"
                 + "INTRA_STAT_CODE CHAR(12) DEFAULT SECURE_RAND(6),"
                 + "PRD_TITLE CHAR(50) DEFAULT SECURE_RAND(25),"
-                + "VALID_FROM DATE DEFAULT NOW(),"
-                + "MOD_DATUM DATE DEFAULT NOW())");
+                + "VALID_FROM DATE DEFAULT CURRENT_DATE,"
+                + "MOD_DATUM DATE DEFAULT CURRENT_DATE)");
         int len = getSize(10, 50000);
         try {
             PreparedStatement prep = conn.prepareStatement(
@@ -99,7 +99,7 @@ public class TestBigDb extends TestDb {
                     long t = System.nanoTime();
                     if (t - time > TimeUnit.SECONDS.toNanos(1)) {
                         time = t;
-                        int free = Utils.getMemoryFree();
+                        long free = Utils.getMemoryFree();
                         println("i: " + i + " free: " + free + " used: " + Utils.getMemoryUsed());
                     }
                 }

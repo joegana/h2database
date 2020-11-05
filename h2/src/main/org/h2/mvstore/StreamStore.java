@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.mvstore;
@@ -95,6 +95,7 @@ public class StreamStore {
      *
      * @param in the stream
      * @return the id (potentially an empty array)
+     * @throws IOException If an I/O error occurs
      */
     @SuppressWarnings("resource")
     public byte[] put(InputStream in) throws IOException {
@@ -432,7 +433,7 @@ public class StreamStore {
     byte[] getBlock(long key) {
         byte[] data = map.get(key);
         if (data == null) {
-            throw DataUtils.newIllegalStateException(
+            throw DataUtils.newMVStoreException(
                     DataUtils.ERROR_BLOCK_NOT_FOUND,
                     "Block {0} not found",  key);
         }
@@ -505,7 +506,7 @@ public class StreamStore {
                 if (buffer == null) {
                     try {
                         buffer = nextBuffer();
-                    } catch (IllegalStateException e) {
+                    } catch (MVStoreException e) {
                         String msg = DataUtils.formatMessage(
                                 DataUtils.ERROR_BLOCK_NOT_FOUND,
                                 "Block not found in id {0}",

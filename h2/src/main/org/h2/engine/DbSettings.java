@@ -1,18 +1,19 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
 
 import java.util.HashMap;
+
+import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
-import org.h2.util.Utils;
 
 /**
  * This class contains various database-level settings. To override the
  * documented default value for a database, append the setting in the database
- * URL: "jdbc:h2:test;ALIAS_COLUMN_NAME=TRUE" when opening the first connection
+ * URL: "jdbc:h2:./test;ANALYZE_SAMPLE=1000" when opening the first connection
  * to the database. The settings can not be changed once the database is open.
  * <p>
  * Some settings are a last resort and temporary solution to work around a
@@ -23,20 +24,16 @@ import org.h2.util.Utils;
  */
 public class DbSettings extends SettingsBase {
 
-    private static DbSettings defaultSettings;
+    /**
+     * The initial size of the hash table.
+     */
+    static final int TABLE_SIZE = 64;
 
     /**
-     * Database setting <code>ALIAS_COLUMN_NAME</code> (default: false).<br />
-     * When enabled, aliased columns (as in SELECT ID AS I FROM TEST) return the
-     * alias (I in this case) in ResultSetMetaData.getColumnName() and 'null' in
-     * getTableName(). If disabled, the real column name (ID in this case) and
-     * table name is returned.
-     * <br />
-     * This setting only affects the default and the MySQL mode. When using
-     * any other mode, this feature is enabled for compatibility, even if this
-     * database setting is not enabled explicitly.
+     * INTERNAL.
+     * The default settings. Those must not be modified.
      */
-    public final boolean aliasColumnName = get("ALIAS_COLUMN_NAME", false);
+    public static final DbSettings DEFAULT = new DbSettings(new HashMap<>(TABLE_SIZE));
 
     /**
      * Database setting <code>ANALYZE_AUTO</code> (default: 2000).<br />
@@ -56,14 +53,40 @@ public class DbSettings extends SettingsBase {
     public final int analyzeSample = get("ANALYZE_SAMPLE", 10_000);
 
     /**
-     * Database setting <code>DATABASE_TO_UPPER</code> (default: true).<br />
-     * Database short names are converted to uppercase for the DATABASE()
-     * function, and in the CATALOG column of all database meta data methods.
-     * Setting this to "false" is experimental. When set to false, all
-     * identifier names (table names, column names) are case sensitive (except
-     * aggregate, built-in functions, data types, and keywords).
+     * Database setting <code>AUTO_COMPACT_FILL_RATE</code>
+     * (default: 90, which means 90%, 0 disables auto-compacting).<br />
+     * Set the auto-compact target fill rate. If the average fill rate (the
+     * percentage of the storage space that contains active data) of the
+     * chunks is lower, then the chunks with a low fill rate are re-written.
+     * Also, if the percentage of empty space between chunks is higher than
+     * this value, then chunks at the end of the file are moved. Compaction
+     * stops if the target fill rate is reached.<br />
+     * This setting only affects MVStore engine.
      */
-    public final boolean databaseToUpper = get("DATABASE_TO_UPPER", true);
+    public final int autoCompactFillRate = get("AUTO_COMPACT_FILL_RATE", 90);
+
+    /**
+     * Database setting <code>DATABASE_TO_LOWER</code> (default: false).<br />
+     * When set to true unquoted identifiers and short name of database are
+     * converted to lower case. Value of this setting should not be changed
+     * after creation of database. Setting this to "true" is experimental.
+     */
+    public final boolean databaseToLower;
+
+    /**
+     * Database setting <code>DATABASE_TO_UPPER</code> (default: true).<br />
+     * When set to true unquoted identifiers and short name of database are
+     * converted to upper case.
+     */
+    public final boolean databaseToUpper;
+
+    /**
+     * Database setting <code>CASE_INSENSITIVE_IDENTIFIERS</code> (default:
+     * false).<br />
+     * When set to true, all identifier names (table names, column names) are
+     * case insensitive. Setting this to "true" is experimental.
+     */
+    public final boolean caseInsensitiveIdentifiers = get("CASE_INSENSITIVE_IDENTIFIERS", false);
 
     /**
      * Database setting <code>DB_CLOSE_ON_EXIT</code> (default: true).<br />
@@ -99,17 +122,10 @@ public class DbSettings extends SettingsBase {
 
     /**
      * Database setting <code>DROP_RESTRICT</code> (default: true).<br />
-     * Whether the default action for DROP TABLE, DROP VIEW, DROP SCHEMA, and
-     * DROP DOMAIN is RESTRICT.
+     * Whether the default action for DROP TABLE, DROP VIEW, DROP SCHEMA, DROP
+     * DOMAIN, and DROP CONSTRAINT is RESTRICT.
      */
     public final boolean dropRestrict = get("DROP_RESTRICT", true);
-
-    /**
-     * Database setting <code>EARLY_FILTER</code> (default: false).<br />
-     * This setting allows table implementations to apply filter conditions
-     * early on.
-     */
-    public final boolean earlyFilter = get("EARLY_FILTER", false);
 
     /**
      * Database setting <code>ESTIMATED_FUNCTION_TABLE_ROWS</code> (default:
@@ -119,16 +135,6 @@ public class DbSettings extends SettingsBase {
      */
     public final int estimatedFunctionTableRows = get(
             "ESTIMATED_FUNCTION_TABLE_ROWS", 1000);
-
-    /**
-     * Database setting <code>FUNCTIONS_IN_SCHEMA</code>
-     * (default: true).<br />
-     * If set, all functions are stored in a schema. Specially, the SCRIPT
-     * statement will always include the schema name in the CREATE ALIAS
-     * statement. This is not backward compatible with H2 versions 1.2.134 and
-     * older.
-     */
-    public final boolean functionsInSchema = get("FUNCTIONS_IN_SCHEMA", true);
 
     /**
      * Database setting <code>LOB_TIMEOUT</code> (default: 300000,
@@ -142,7 +148,8 @@ public class DbSettings extends SettingsBase {
     /**
      * Database setting <code>MAX_COMPACT_COUNT</code>
      * (default: Integer.MAX_VALUE).<br />
-     * The maximum number of pages to move when closing a database.
+     * The maximum number of pages to move when closing a database.<br />
+     * This setting only affects PageStore engine.
      */
     public final int maxCompactCount = get("MAX_COMPACT_COUNT",
             Integer.MAX_VALUE);
@@ -207,12 +214,6 @@ public class DbSettings extends SettingsBase {
     public final boolean optimizeInSelect = get("OPTIMIZE_IN_SELECT", true);
 
     /**
-     * Database setting <code>OPTIMIZE_IS_NULL</code> (default: false).<br />
-     * Use an index for condition of the form columnName IS NULL.
-     */
-    public final boolean optimizeIsNull = get("OPTIMIZE_IS_NULL", true);
-
-    /**
      * Database setting <code>OPTIMIZE_OR</code> (default: true).<br />
      * Convert (C=? OR C=?) to (C IN(?, ?)).
      */
@@ -224,13 +225,6 @@ public class DbSettings extends SettingsBase {
      * added so an index on A can be used.
      */
     public final boolean optimizeTwoEquals = get("OPTIMIZE_TWO_EQUALS", true);
-
-    /**
-     * Database setting <code>OPTIMIZE_UPDATE</code> (default: true).<br />
-     * Speed up inserts, updates, and deletes by not reading all rows from a
-     * page unless necessary.
-     */
-    public final boolean optimizeUpdate = get("OPTIMIZE_UPDATE", true);
 
     /**
      * Database setting <code>PAGE_STORE_MAX_GROWTH</code>
@@ -274,35 +268,12 @@ public class DbSettings extends SettingsBase {
     public final boolean recompileAlways = get("RECOMPILE_ALWAYS", false);
 
     /**
-     * Database setting <code>RECONNECT_CHECK_DELAY</code> (default: 200).<br />
-     * Check the .lock.db file every this many milliseconds to detect that the
-     * database was changed. The process writing to the database must first
-     * notify a change in the .lock.db file, then wait twice this many
-     * milliseconds before updating the database.
-     */
-    public final int reconnectCheckDelay = get("RECONNECT_CHECK_DELAY", 200);
-
-    /**
      * Database setting <code>REUSE_SPACE</code> (default: true).<br />
      * If disabled, all changes are appended to the database file, and existing
      * content is never overwritten. This setting has no effect if the database
      * is already open.
      */
     public final boolean reuseSpace = get("REUSE_SPACE", true);
-
-    /**
-     * Database setting <code>ROWID</code> (default: true).<br />
-     * If set, each table has a pseudo-column _ROWID_.
-     */
-    public final boolean rowId = get("ROWID", true);
-
-    /**
-     * Database setting <code>SELECT_FOR_UPDATE_MVCC</code>
-     * (default: true).<br />
-     * If set, SELECT .. FOR UPDATE queries lock only the selected rows when
-     * using MVCC.
-     */
-    public final boolean selectForUpdateMvcc = get("SELECT_FOR_UPDATE_MVCC", true);
 
     /**
      * Database setting <code>SHARE_LINKED_CONNECTIONS</code>
@@ -326,7 +297,7 @@ public class DbSettings extends SettingsBase {
      * (default: true).<br />
      * Use the MVStore storage engine.
      */
-    public boolean mvStore = get("MV_STORE", true);
+    public final boolean mvStore = get("MV_STORE", true);
 
     /**
      * Database setting <code>COMPRESS</code>
@@ -336,21 +307,37 @@ public class DbSettings extends SettingsBase {
     public final boolean compressData = get("COMPRESS", false);
 
     /**
-     * Database setting <code>STANDARD_DROP_TABLE_RESTRICT</code> (default:
-     * false).<br />
-     * <code>true</code> if DROP TABLE RESTRICT should fail if there's any
-     * foreign key referencing the table to be dropped. <code>false</code> if
-     * foreign keys referencing the table to be dropped should be silently
-     * dropped as well.
+     * Database setting <code>IGNORE_CATALOGS</code>
+     * (default: false).<br />
+     * If set, all catalog names in identifiers are silently accepted
+     * without comparing them with the short name of the database.
      */
-    public final boolean standardDropTableRestrict = get(
-            "STANDARD_DROP_TABLE_RESTRICT", false);
+    public final boolean ignoreCatalogs = get("IGNORE_CATALOGS", false);
+
+    /**
+     * Database setting <code>ZERO_BASED_ENUMS</code>
+     * (default: false).<br />
+     * If set, ENUM ordinal values are 0-based.
+     */
+    public final boolean zeroBasedEnums = get("ZERO_BASED_ENUMS", false);
 
     private DbSettings(HashMap<String, String> s) {
         super(s);
-        if (s.get("NESTED_JOINS") != null || Utils.getProperty("h2.nestedJoins", null) != null) {
-            throw DbException.getUnsupportedException("NESTED_JOINS setting is not available since 1.4.197");
+        boolean lower = get("DATABASE_TO_LOWER", false);
+        boolean upperSet = containsKey("DATABASE_TO_UPPER");
+        boolean upper = get("DATABASE_TO_UPPER", true);
+        if (lower && upper) {
+            if (upperSet) {
+                throw DbException.get(ErrorCode.UNSUPPORTED_SETTING_COMBINATION,
+                        "DATABASE_TO_LOWER & DATABASE_TO_UPPER");
+            }
+            upper = false;
         }
+        databaseToLower = lower;
+        databaseToUpper = upper;
+        HashMap<String, String> settings = getSettings();
+        settings.put("DATABASE_TO_LOWER", Boolean.toString(lower));
+        settings.put("DATABASE_TO_UPPER", Boolean.toString(upper));
     }
 
     /**
@@ -360,21 +347,8 @@ public class DbSettings extends SettingsBase {
      * @param s the settings
      * @return the settings
      */
-    public static DbSettings getInstance(HashMap<String, String> s) {
+    static DbSettings getInstance(HashMap<String, String> s) {
         return new DbSettings(s);
-    }
-
-    /**
-     * INTERNAL.
-     * Get the default settings. Those must not be modified.
-     *
-     * @return the settings
-     */
-    public static DbSettings getDefaultSettings() {
-        if (defaultSettings == null) {
-            defaultSettings = new DbSettings(new HashMap<String, String>());
-        }
-        return defaultSettings;
     }
 
 }

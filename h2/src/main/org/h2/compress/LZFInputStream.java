@@ -1,13 +1,13 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.compress;
 
 import java.io.IOException;
 import java.io.InputStream;
-import org.h2.message.DbException;
+import org.h2.mvstore.DataUtils;
 import org.h2.util.Utils;
 
 /**
@@ -55,7 +55,7 @@ public class LZFInputStream extends InputStream {
             try {
                 decompress.expand(inBuffer, 0, len, buffer, 0, size);
             } catch (ArrayIndexOutOfBoundsException e) {
-                DbException.convertToIOException(e);
+                throw DataUtils.convertToIOException(e);
             }
             this.bufferLength = size;
         }

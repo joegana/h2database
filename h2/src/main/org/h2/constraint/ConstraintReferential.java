@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.constraint;
@@ -8,9 +8,8 @@ package org.h2.constraint;
 import java.util.ArrayList;
 import java.util.HashSet;
 import org.h2.api.ErrorCode;
-import org.h2.command.Parser;
 import org.h2.command.Prepared;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
 import org.h2.expression.Parameter;
 import org.h2.index.Cursor;
@@ -23,7 +22,6 @@ import org.h2.schema.Schema;
 import org.h2.table.Column;
 import org.h2.table.IndexColumn;
 import org.h2.table.Table;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
 import org.h2.value.Value;
 import org.h2.value.ValueNull;
@@ -39,9 +37,8 @@ public class ConstraintReferential extends Constraint {
     private ConstraintActionType updateAction = ConstraintActionType.RESTRICT;
     private Table refTable;
     private Index index;
-    private Index refIndex;
+    private ConstraintUnique refConstraint;
     private boolean indexOwner;
-    private boolean refIndexOwner;
     private String deleteSQL, updateSQL;
     private boolean skipOwnTable;
 
@@ -79,52 +76,42 @@ public class ConstraintReferential extends Constraint {
      */
     public String getCreateSQLForCopy(Table forTable, Table forRefTable,
             String quotedName, boolean internalIndex) {
-        StatementBuilder buff = new StatementBuilder("ALTER TABLE ");
-        String mainTable = forTable.getSQL();
-        buff.append(mainTable).append(" ADD CONSTRAINT ");
+        StringBuilder builder = new StringBuilder("ALTER TABLE ");
+        forTable.getSQL(builder, DEFAULT_SQL_FLAGS).append(" ADD CONSTRAINT ");
         if (forTable.isHidden()) {
-            buff.append("IF NOT EXISTS ");
+            builder.append("IF NOT EXISTS ");
         }
-        buff.append(quotedName);
+        builder.append(quotedName);
         if (comment != null) {
-            buff.append(" COMMENT ").append(StringUtils.quoteStringSQL(comment));
+            builder.append(" COMMENT ");
+            StringUtils.quoteStringSQL(builder, comment);
         }
         IndexColumn[] cols = columns;
         IndexColumn[] refCols = refColumns;
-        buff.append(" FOREIGN KEY(");
-        for (IndexColumn c : cols) {
-            buff.appendExceptFirst(", ");
-            buff.append(c.getSQL());
-        }
-        buff.append(')');
+        builder.append(" FOREIGN KEY(");
+        IndexColumn.writeColumns(builder, cols, DEFAULT_SQL_FLAGS);
+        builder.append(')');
         if (internalIndex && indexOwner && forTable == this.table) {
-            buff.append(" INDEX ").append(index.getSQL());
+            builder.append(" INDEX ");
+            index.getSQL(builder, DEFAULT_SQL_FLAGS);
         }
-        buff.append(" REFERENCES ");
-        String quotedRefTable;
+        builder.append(" REFERENCES ");
         if (this.table == this.refTable) {
             // self-referencing constraints: need to use new table
-            quotedRefTable = forTable.getSQL();
+            forTable.getSQL(builder, DEFAULT_SQL_FLAGS);
         } else {
-            quotedRefTable = forRefTable.getSQL();
+            forRefTable.getSQL(builder, DEFAULT_SQL_FLAGS);
         }
-        buff.append(quotedRefTable).append('(');
-        buff.resetCount();
-        for (IndexColumn r : refCols) {
-            buff.appendExceptFirst(", ");
-            buff.append(r.getSQL());
-        }
-        buff.append(')');
-        if (internalIndex && refIndexOwner && forTable == this.table) {
-            buff.append(" INDEX ").append(refIndex.getSQL());
-        }
+        builder.append('(');
+        IndexColumn.writeColumns(builder, refCols, DEFAULT_SQL_FLAGS);
+        builder.append(')');
         if (deleteAction != ConstraintActionType.RESTRICT) {
-            buff.append(" ON DELETE ").append(deleteAction.getSqlName());
+            builder.append(" ON DELETE ").append(deleteAction.getSqlName());
         }
         if (updateAction != ConstraintActionType.RESTRICT) {
-            buff.append(" ON UPDATE ").append(updateAction.getSqlName());
+            builder.append(" ON UPDATE ").append(updateAction.getSqlName());
         }
-        return buff.append(" NOCHECK").toString();
+        return builder.append(" NOCHECK").toString();
     }
 
 
@@ -137,43 +124,38 @@ public class ConstraintReferential extends Constraint {
      * @return the description
      */
     private String getShortDescription(Index searchIndex, SearchRow check) {
-        StatementBuilder buff = new StatementBuilder(getName());
-        buff.append(": ").append(table.getSQL()).append(" FOREIGN KEY(");
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(", ");
-            buff.append(c.getSQL());
-        }
-        buff.append(") REFERENCES ").append(refTable.getSQL()).append('(');
-        buff.resetCount();
-        for (IndexColumn r : refColumns) {
-            buff.appendExceptFirst(", ");
-            buff.append(r.getSQL());
-        }
-        buff.append(')');
+        StringBuilder builder = new StringBuilder(getName()).append(": ");
+        table.getSQL(builder, TRACE_SQL_FLAGS).append(" FOREIGN KEY(");
+        IndexColumn.writeColumns(builder, columns, TRACE_SQL_FLAGS);
+        builder.append(") REFERENCES ");
+        refTable.getSQL(builder, TRACE_SQL_FLAGS).append('(');
+        IndexColumn.writeColumns(builder, refColumns, TRACE_SQL_FLAGS);
+        builder.append(')');
         if (searchIndex != null && check != null) {
-            buff.append(" (");
-            buff.resetCount();
+            builder.append(" (");
             Column[] cols = searchIndex.getColumns();
             int len = Math.min(columns.length, cols.length);
             for (int i = 0; i < len; i++) {
                 int idx = cols[i].getColumnId();
                 Value c = check.getValue(idx);
-                buff.appendExceptFirst(", ");
-                buff.append(c == null ? "" : c.toString());
+                if (i > 0) {
+                    builder.append(", ");
+                }
+                builder.append(c == null ? "" : c.toString());
             }
-            buff.append(')');
+            builder.append(')');
         }
-        return buff.toString();
+        return builder.toString();
     }
 
     @Override
     public String getCreateSQLWithoutIndexes() {
-        return getCreateSQLForCopy(table, refTable, getSQL(), false);
+        return getCreateSQLForCopy(table, refTable, getSQL(DEFAULT_SQL_FLAGS), false);
     }
 
     @Override
     public String getCreateSQL() {
-        return getCreateSQLForCopy(table, getSQL());
+        return getCreateSQLForCopy(table, getSQL(DEFAULT_SQL_FLAGS));
     }
 
     public void setColumns(IndexColumn[] cols) {
@@ -227,31 +209,27 @@ public class ConstraintReferential extends Constraint {
     }
 
     /**
-     * Set the index of the referenced table to use for this constraint.
+     * Set the unique constraint of the referenced table to use for this
+     * constraint.
      *
-     * @param refIndex the index
-     * @param isRefOwner true if the index is generated by the system and
-     *            belongs to this constraint
+     * @param refConstraint
+     *            the unique constraint
      */
-    public void setRefIndex(Index refIndex, boolean isRefOwner) {
-        this.refIndex = refIndex;
-        this.refIndexOwner = isRefOwner;
+    public void setRefConstraint(ConstraintUnique refConstraint) {
+        this.refConstraint = refConstraint;
     }
 
     @Override
-    public void removeChildrenAndResources(Session session) {
+    public void removeChildrenAndResources(SessionLocal session) {
         table.removeConstraint(this);
         refTable.removeConstraint(this);
         if (indexOwner) {
             table.removeIndexOrTransferOwnership(session, index);
         }
-        if (refIndexOwner) {
-            refTable.removeIndexOrTransferOwnership(session, refIndex);
-        }
         database.removeMeta(session, getId());
         refTable = null;
         index = null;
-        refIndex = null;
+        refConstraint = null;
         columns = null;
         refColumns = null;
         deleteSQL = null;
@@ -261,7 +239,7 @@ public class ConstraintReferential extends Constraint {
     }
 
     @Override
-    public void checkRow(Session session, Table t, Row oldRow, Row newRow) {
+    public void checkRow(SessionLocal session, Table t, Row oldRow, Row newRow) {
         if (!database.getReferentialIntegrity()) {
             return;
         }
@@ -279,7 +257,7 @@ public class ConstraintReferential extends Constraint {
         }
     }
 
-    private void checkRowOwnTable(Session session, Row oldRow, Row newRow) {
+    private void checkRowOwnTable(SessionLocal session, Row oldRow, Row newRow) {
         if (newRow == null) {
             return;
         }
@@ -292,7 +270,7 @@ public class ConstraintReferential extends Constraint {
                 return;
             }
             if (constraintColumnsEqual) {
-                if (!database.areEqual(v, oldRow.getValue(idx))) {
+                if (!session.areEqual(v, oldRow.getValue(idx))) {
                     constraintColumnsEqual = false;
                 }
             }
@@ -311,7 +289,7 @@ public class ConstraintReferential extends Constraint {
                 Column refCol = refColumns[i].column;
                 int refIdx = refCol.getColumnId();
                 Value r = newRow.getValue(refIdx);
-                if (!database.areEqual(r, v)) {
+                if (!session.areEqual(r, v)) {
                     self = false;
                     break;
                 }
@@ -326,15 +304,16 @@ public class ConstraintReferential extends Constraint {
             Value v = newRow.getValue(idx);
             Column refCol = refColumns[i].column;
             int refIdx = refCol.getColumnId();
-            check.setValue(refIdx, refCol.convert(v));
+            check.setValue(refIdx, refCol.convert(session, v));
         }
+        Index refIndex = refConstraint.getIndex();
         if (!existsRow(session, refIndex, check, null)) {
             throw DbException.get(ErrorCode.REFERENTIAL_INTEGRITY_VIOLATED_PARENT_MISSING_1,
                     getShortDescription(refIndex, check));
         }
     }
 
-    private boolean existsRow(Session session, Index searchIndex,
+    private boolean existsRow(SessionLocal session, Index searchIndex,
             SearchRow check, Row excluding) {
         Table searchTable = searchIndex.getTable();
         searchTable.lock(session, false, false);
@@ -352,7 +331,7 @@ public class ConstraintReferential extends Constraint {
                 int idx = cols[i].getColumnId();
                 Value c = check.getValue(idx);
                 Value f = found.getValue(idx);
-                if (searchTable.compareValues(c, f) != 0) {
+                if (searchTable.compareValues(session, c, f) != 0) {
                     allEqual = false;
                     break;
                 }
@@ -365,16 +344,16 @@ public class ConstraintReferential extends Constraint {
     }
 
     private boolean isEqual(Row oldRow, Row newRow) {
-        return refIndex.compareRows(oldRow, newRow) == 0;
+        return refConstraint.getIndex().compareRows(oldRow, newRow) == 0;
     }
 
-    private void checkRow(Session session, Row oldRow) {
-        SearchRow check = table.getTemplateSimpleRow(false);
+    private void checkRow(SessionLocal session, Row oldRow) {
+        SearchRow check = table.getRowFactory().createRow();
         for (int i = 0, len = columns.length; i < len; i++) {
             Column refCol = refColumns[i].column;
             int refIdx = refCol.getColumnId();
             Column col = columns[i].column;
-            Value v = col.convert(oldRow.getValue(refIdx));
+            Value v = col.convert(session, oldRow.getValue(refIdx));
             if (v == ValueNull.INSTANCE) {
                 return;
             }
@@ -388,7 +367,7 @@ public class ConstraintReferential extends Constraint {
         }
     }
 
-    private void checkRowRefTable(Session session, Row oldRow, Row newRow) {
+    private void checkRowRefTable(SessionLocal session, Row oldRow, Row newRow) {
         if (oldRow == null) {
             // this is an insert
             return;
@@ -470,6 +449,9 @@ public class ConstraintReferential extends Constraint {
         buildDeleteSQL();
     }
 
+    /**
+     * Update the constraint SQL when a referenced column is renamed.
+     */
     public void updateOnTableColumnRename() {
         if (deleteAction != null) {
             deleteSQL = null;
@@ -485,21 +467,22 @@ public class ConstraintReferential extends Constraint {
         if (deleteAction == ConstraintActionType.RESTRICT) {
             return;
         }
-        StatementBuilder buff = new StatementBuilder();
+        StringBuilder builder = new StringBuilder();
         if (deleteAction == ConstraintActionType.CASCADE) {
-            buff.append("DELETE FROM ").append(table.getSQL());
+            builder.append("DELETE FROM ");
+            table.getSQL(builder, DEFAULT_SQL_FLAGS);
         } else {
-            appendUpdate(buff);
+            appendUpdate(builder);
         }
-        appendWhere(buff);
-        deleteSQL = buff.toString();
+        appendWhere(builder);
+        deleteSQL = builder.toString();
     }
 
-    private Prepared getUpdate(Session session) {
+    private Prepared getUpdate(SessionLocal session) {
         return prepare(session, updateSQL, updateAction);
     }
 
-    private Prepared getDelete(Session session) {
+    private Prepared getDelete(SessionLocal session) {
         return prepare(session, deleteSQL, deleteAction);
     }
 
@@ -527,10 +510,10 @@ public class ConstraintReferential extends Constraint {
         if (updateAction == ConstraintActionType.RESTRICT) {
             return;
         }
-        StatementBuilder buff = new StatementBuilder();
-        appendUpdate(buff);
-        appendWhere(buff);
-        updateSQL = buff.toString();
+        StringBuilder builder = new StringBuilder();
+        appendUpdate(builder);
+        appendWhere(builder);
+        updateSQL = builder.toString();
     }
 
     @Override
@@ -539,7 +522,7 @@ public class ConstraintReferential extends Constraint {
         buildDeleteSQL();
     }
 
-    private Prepared prepare(Session session, String sql, ConstraintActionType action) {
+    private Prepared prepare(SessionLocal session, String sql, ConstraintActionType action) {
         Prepared command = session.prepare(sql);
         if (action != ConstraintActionType.CASCADE) {
             ArrayList<Parameter> params = command.getParameters();
@@ -550,7 +533,7 @@ public class ConstraintReferential extends Constraint {
                 if (action == ConstraintActionType.SET_NULL) {
                     value = ValueNull.INSTANCE;
                 } else {
-                    Expression expr = column.getDefaultExpression();
+                    Expression expr = column.getEffectiveDefaultExpression();
                     if (expr == null) {
                         throw DbException.get(ErrorCode.NO_DEFAULT_SET_1, column.getName());
                     }
@@ -562,22 +545,15 @@ public class ConstraintReferential extends Constraint {
         return command;
     }
 
-    private void appendUpdate(StatementBuilder buff) {
-        buff.append("UPDATE ").append(table.getSQL()).append(" SET ");
-        buff.resetCount();
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(" , ");
-            buff.append(Parser.quoteIdentifier(c.column.getName())).append("=?");
-        }
+    private void appendUpdate(StringBuilder builder) {
+        builder.append("UPDATE ");
+        table.getSQL(builder, DEFAULT_SQL_FLAGS).append(" SET ");
+        IndexColumn.writeColumns(builder, columns, ", ", "=?", IndexColumn.SQL_NO_ORDER);
     }
 
-    private void appendWhere(StatementBuilder buff) {
-        buff.append(" WHERE ");
-        buff.resetCount();
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(" AND ");
-            buff.append(Parser.quoteIdentifier(c.column.getName())).append("=?");
-        }
+    private void appendWhere(StringBuilder builder) {
+        builder.append(" WHERE ");
+        IndexColumn.writeColumns(builder, columns, " AND ", "=?", IndexColumn.SQL_NO_ORDER);
     }
 
     @Override
@@ -587,17 +563,15 @@ public class ConstraintReferential extends Constraint {
 
     @Override
     public boolean usesIndex(Index idx) {
-        return idx == index || idx == refIndex;
+        return idx == index;
     }
 
     @Override
     public void setIndexOwner(Index index) {
         if (this.index == index) {
             indexOwner = true;
-        } else if (this.refIndex == index) {
-            refIndexOwner = true;
         } else {
-            DbException.throwInternalError(index + " " + toString());
+            throw DbException.getInternalError(index + " " + toString());
         }
     }
 
@@ -607,50 +581,50 @@ public class ConstraintReferential extends Constraint {
     }
 
     @Override
-    public void checkExistingData(Session session) {
+    public void checkExistingData(SessionLocal session) {
         if (session.getDatabase().isStarting()) {
             // don't check at startup
             return;
         }
-        session.startStatementWithinTransaction();
-        StatementBuilder buff = new StatementBuilder("SELECT 1 FROM (SELECT ");
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(", ");
-            buff.append(c.getSQL());
+        StringBuilder builder = new StringBuilder("SELECT 1 FROM (SELECT ");
+        IndexColumn.writeColumns(builder, columns, IndexColumn.SQL_NO_ORDER);
+        builder.append(" FROM ");
+        table.getSQL(builder, DEFAULT_SQL_FLAGS).append(" WHERE ");
+        IndexColumn.writeColumns(builder, columns, " AND ", " IS NOT NULL ", IndexColumn.SQL_NO_ORDER);
+        builder.append(" ORDER BY ");
+        IndexColumn.writeColumns(builder, columns, DEFAULT_SQL_FLAGS);
+        builder.append(") C WHERE NOT EXISTS(SELECT 1 FROM ");
+        refTable.getSQL(builder, DEFAULT_SQL_FLAGS).append(" P WHERE ");
+        for (int i = 0, l = columns.length; i < l; i++) {
+            if (i > 0) {
+                builder.append(" AND ");
+            }
+            builder.append("C.");
+            columns[i].column.getSQL(builder, DEFAULT_SQL_FLAGS).append('=').append("P.");
+            refColumns[i].column.getSQL(builder, DEFAULT_SQL_FLAGS);
         }
-        buff.append(" FROM ").append(table.getSQL()).append(" WHERE ");
-        buff.resetCount();
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(" AND ");
-            buff.append(c.getSQL()).append(" IS NOT NULL ");
-        }
-        buff.append(" ORDER BY ");
-        buff.resetCount();
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(", ");
-            buff.append(c.getSQL());
-        }
-        buff.append(") C WHERE NOT EXISTS(SELECT 1 FROM ").
-            append(refTable.getSQL()).append(" P WHERE ");
-        buff.resetCount();
-        int i = 0;
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(" AND ");
-            buff.append("C.").append(c.getSQL()).append('=').
-                append("P.").append(refColumns[i++].getSQL());
-        }
-        buff.append(')');
-        String sql = buff.toString();
-        ResultInterface r = session.prepare(sql).query(1);
-        if (r.next()) {
-            throw DbException.get(ErrorCode.REFERENTIAL_INTEGRITY_VIOLATED_PARENT_MISSING_1,
-                    getShortDescription(null, null));
+        builder.append(')');
+
+        session.startStatementWithinTransaction(null);
+        try {
+            ResultInterface r = session.prepare(builder.toString()).query(1);
+            if (r.next()) {
+                throw DbException.get(ErrorCode.REFERENTIAL_INTEGRITY_VIOLATED_PARENT_MISSING_1,
+                        getShortDescription(null, null));
+            }
+        } finally {
+            session.endStatement();
         }
     }
 
     @Override
-    public Index getUniqueIndex() {
-        return refIndex;
+    public Index getIndex() {
+        return index;
+    }
+
+    @Override
+    public ConstraintUnique getReferencedConstraint() {
+        return refConstraint;
     }
 
 }

@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.dml;
@@ -13,7 +13,7 @@ import java.nio.charset.StandardCharsets;
 
 import org.h2.command.CommandInterface;
 import org.h2.command.Prepared;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.message.DbException;
 import org.h2.result.ResultInterface;
 import org.h2.util.ScriptReader;
@@ -33,14 +33,20 @@ public class RunScriptCommand extends ScriptBase {
 
     private Charset charset = StandardCharsets.UTF_8;
 
-    public RunScriptCommand(Session session) {
+    private boolean quirksMode;
+
+    private boolean variableBinary;
+
+    public RunScriptCommand(SessionLocal session) {
         super(session);
     }
 
     @Override
-    public int update() {
+    public long update() {
         session.getUser().checkAdmin();
         int count = 0;
+        boolean oldQuirksMode = session.isQuirksMode();
+        boolean oldVariableBinary = session.isVariableBinary();
         try {
             openInput();
             BufferedReader reader = new BufferedReader(new InputStreamReader(in, charset));
@@ -48,6 +54,12 @@ public class RunScriptCommand extends ScriptBase {
             reader.mark(1);
             if (reader.read() != UTF8_BOM) {
                 reader.reset();
+            }
+            if (quirksMode) {
+                session.setQuirksMode(true);
+            }
+            if (variableBinary) {
+                session.setVariableBinary(true);
             }
             ScriptReader r = new ScriptReader(reader);
             while (true) {
@@ -65,6 +77,12 @@ public class RunScriptCommand extends ScriptBase {
         } catch (IOException e) {
             throw DbException.convertIOException(e, null);
         } finally {
+            if (quirksMode) {
+                session.setQuirksMode(oldQuirksMode);
+            }
+            if (variableBinary) {
+                session.setVariableBinary(oldVariableBinary);
+            }
             closeIO();
         }
         return count;
@@ -88,6 +106,27 @@ public class RunScriptCommand extends ScriptBase {
 
     public void setCharset(Charset charset) {
         this.charset = charset;
+    }
+
+    /**
+     * Enables or disables the quirks mode.
+     *
+     * @param quirksMode
+     *            whether quirks mode should be enabled
+     */
+    public void setQuirksMode(boolean quirksMode) {
+        this.quirksMode = quirksMode;
+    }
+
+    /**
+     * Changes parsing of a BINARY data type.
+     *
+     * @param variableBinary
+     *            {@code true} to parse BINARY as VARBINARY, {@code false} to
+     *            parse it as is
+     */
+    public void setVariableBinary(boolean variableBinary) {
+        this.variableBinary = variableBinary;
     }
 
     @Override

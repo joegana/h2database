@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
@@ -8,9 +8,11 @@ package org.h2.engine;
 import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
 import org.h2.result.Row;
+import org.h2.result.SearchRow;
 import org.h2.store.Data;
 import org.h2.store.FileStore;
 import org.h2.table.Table;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 
 /**
@@ -75,21 +77,13 @@ public class UndoLogRecord {
      *
      * @param session the session
      */
-    void undo(Session session) {
-        Database db = session.getDatabase();
+    void undo(SessionLocal session) {
         switch (operation) {
         case INSERT:
             if (state == IN_MEMORY_INVALID) {
                 state = IN_MEMORY;
             }
-            if (db.getLockMode() == Constants.LOCK_MODE_OFF) {
-                if (row.isDeleted()) {
-                    // it might have been deleted by another thread
-                    return;
-                }
-            }
             try {
-                row.setDeleted(false);
                 table.removeRow(session, row);
                 table.fireAfterRow(session, row, null, true);
             } catch (DbException e) {
@@ -117,7 +111,7 @@ public class UndoLogRecord {
             }
             break;
         default:
-            DbException.throwInternalError("op=" + operation);
+            throw DbException.getInternalError("op=" + operation);
         }
     }
 
@@ -131,14 +125,13 @@ public class UndoLogRecord {
         int p = buff.length();
         buff.writeInt(0);
         buff.writeInt(operation);
-        buff.writeByte(row.isDeleted() ? (byte) 1 : (byte) 0);
         buff.writeInt(log.getTableId(table));
         buff.writeLong(row.getKey());
         int count = row.getColumnCount();
         buff.writeInt(count);
         for (int i = 0; i < count; i++) {
             Value v = row.getValue(i);
-            buff.checkCapacity(buff.getValueLen(v));
+            buff.checkCapacity(Data.getValueLen(v));
             buff.writeValue(v);
         }
         buff.fillAligned();
@@ -196,26 +189,21 @@ public class UndoLogRecord {
         }
         int oldOp = operation;
         load(buff, log);
-        if (SysProperties.CHECK) {
-            if (operation != oldOp) {
-                DbException.throwInternalError("operation=" + operation + " op=" + oldOp);
-            }
+        if (operation != oldOp) {
+            throw DbException.getInternalError("operation=" + operation + " op=" + oldOp);
         }
     }
 
     private void load(Data buff, UndoLog log) {
         operation = (short) buff.readInt();
-        boolean deleted = buff.readByte() == 1;
         table = log.getTable(buff.readInt());
         long key = buff.readLong();
         int columnCount = buff.readInt();
         Value[] values = new Value[columnCount];
         for (int i = 0; i < columnCount; i++) {
-            values[i] = buff.readValue();
+            values[i] = buff.readValue(TypeInfo.TYPE_UNKNOWN);
         }
-        row = getTable().getDatabase().createRow(values, Row.MEMORY_CALCULATE);
-        row.setKey(key);
-        row.setDeleted(deleted);
+        row = table.createRow(values, SearchRow.MEMORY_CALCULATE, key);
         state = IN_MEMORY_INVALID;
     }
 

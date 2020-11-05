@@ -1,58 +1,54 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression;
 
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
+import org.h2.expression.condition.Comparison;
 import org.h2.index.IndexCondition;
 import org.h2.message.DbException;
-import org.h2.table.ColumnResolver;
 import org.h2.table.TableFilter;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
-import org.h2.value.ValueArray;
 import org.h2.value.ValueBoolean;
 import org.h2.value.ValueNull;
 
 /**
  * An expression representing a constant value.
  */
-public class ValueExpression extends Expression {
+public class ValueExpression extends Operation0 {
+
     /**
      * The expression represents ValueNull.INSTANCE.
      */
-    private static final Object NULL = new ValueExpression(ValueNull.INSTANCE);
+    public static final ValueExpression NULL = new ValueExpression(ValueNull.INSTANCE);
 
     /**
      * This special expression represents the default value. It is used for
      * UPDATE statements of the form SET COLUMN = DEFAULT. The value is
      * ValueNull.INSTANCE, but should never be accessed.
      */
-    private static final Object DEFAULT = new ValueExpression(ValueNull.INSTANCE);
+    public static final ValueExpression DEFAULT = new ValueExpression(ValueNull.INSTANCE);
 
-    private final Value value;
+    /**
+     * The expression represents ValueBoolean.TRUE.
+     */
+    public static final ValueExpression TRUE = new ValueExpression(ValueBoolean.TRUE);
 
-    private ValueExpression(Value value) {
+    /**
+     * The expression represents ValueBoolean.FALSE.
+     */
+    public static final ValueExpression FALSE = new ValueExpression(ValueBoolean.FALSE);
+
+    /**
+     * The value.
+     */
+    final Value value;
+
+    ValueExpression(Value value) {
         this.value = value;
-    }
-
-    /**
-     * Get the NULL expression.
-     *
-     * @return the NULL expression
-     */
-    public static ValueExpression getNull() {
-        return (ValueExpression) NULL;
-    }
-
-    /**
-     * Get the DEFAULT expression.
-     *
-     * @return the DEFAULT expression
-     */
-    public static ValueExpression getDefault() {
-        return (ValueExpression) DEFAULT;
     }
 
     /**
@@ -63,45 +59,60 @@ public class ValueExpression extends Expression {
      */
     public static ValueExpression get(Value value) {
         if (value == ValueNull.INSTANCE) {
-            return getNull();
+            return NULL;
+        }
+        if (value.getValueType() == Value.BOOLEAN) {
+            return getBoolean(value.getBoolean());
         }
         return new ValueExpression(value);
     }
 
+    /**
+     * Create a new expression with the given boolean value.
+     *
+     * @param value the boolean value
+     * @return the expression
+     */
+    public static ValueExpression getBoolean(Value value) {
+        if (value == ValueNull.INSTANCE) {
+            return TypedValueExpression.UNKNOWN;
+        }
+        return getBoolean(value.getBoolean());
+    }
+
+    /**
+     * Create a new expression with the given boolean value.
+     *
+     * @param value the boolean value
+     * @return the expression
+     */
+    public static ValueExpression getBoolean(boolean value) {
+        return value ? TRUE : FALSE;
+    }
+
     @Override
-    public Value getValue(Session session) {
+    public Value getValue(SessionLocal session) {
         return value;
     }
 
     @Override
-    public int getType() {
+    public TypeInfo getType() {
         return value.getType();
     }
 
     @Override
-    public void createIndexConditions(Session session, TableFilter filter) {
-        if (value.getType() == Value.BOOLEAN) {
-            boolean v = ((ValueBoolean) value).getBoolean();
-            if (!v) {
-                filter.addIndexCondition(IndexCondition.get(Comparison.FALSE, null, this));
-            }
+    public void createIndexConditions(SessionLocal session, TableFilter filter) {
+        if (value.getValueType() == Value.BOOLEAN && !value.getBoolean()) {
+            filter.addIndexCondition(IndexCondition.get(Comparison.FALSE, null, this));
         }
     }
 
     @Override
-    public Expression getNotIfPossible(Session session) {
-        return new Comparison(session, Comparison.EQUAL, this,
-                ValueExpression.get(ValueBoolean.FALSE));
-    }
-
-    @Override
-    public void mapColumns(ColumnResolver resolver, int level, int state) {
-        // nothing to do
-    }
-
-    @Override
-    public Expression optimize(Session session) {
-        return this;
+    public Expression getNotIfPossible(SessionLocal session) {
+        if (value == ValueNull.INSTANCE) {
+            return TypedValueExpression.UNKNOWN;
+        }
+        return getBoolean(!value.getBoolean());
     }
 
     @Override
@@ -110,47 +121,29 @@ public class ValueExpression extends Expression {
     }
 
     @Override
+    public boolean isNullConstant() {
+        return this == NULL;
+    }
+
+    @Override
     public boolean isValueSet() {
         return true;
     }
 
     @Override
-    public void setEvaluatable(TableFilter tableFilter, boolean b) {
-        // nothing to do
-    }
-
-    @Override
-    public int getScale() {
-        return value.getScale();
-    }
-
-    @Override
-    public long getPrecision() {
-        return value.getPrecision();
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return value.getDisplaySize();
-    }
-
-    @Override
-    public String getSQL() {
+    public StringBuilder getUnenclosedSQL(StringBuilder builder, int sqlFlags) {
         if (this == DEFAULT) {
-            return "DEFAULT";
+            builder.append("DEFAULT");
+        } else {
+            value.getSQL(builder, sqlFlags);
         }
-        return value.getSQL();
-    }
-
-    @Override
-    public void updateAggregate(Session session, int stage) {
-        // nothing to do
+        return builder;
     }
 
     @Override
     public boolean isEverything(ExpressionVisitor visitor) {
         switch (visitor.getType()) {
-        case ExpressionVisitor.OPTIMIZABLE_MIN_MAX_COUNT_ALL:
+        case ExpressionVisitor.OPTIMIZABLE_AGGREGATE:
         case ExpressionVisitor.DETERMINISTIC:
         case ExpressionVisitor.READONLY:
         case ExpressionVisitor.INDEPENDENT:
@@ -163,7 +156,7 @@ public class ValueExpression extends Expression {
         case ExpressionVisitor.GET_COLUMNS2:
             return true;
         default:
-            throw DbException.throwInternalError("type=" + visitor.getType());
+            throw DbException.getInternalError("type=" + visitor.getType());
         }
     }
 
@@ -172,11 +165,4 @@ public class ValueExpression extends Expression {
         return 0;
     }
 
-    @Override
-    public Expression[] getExpressionColumns(Session session) {
-        if (getType() == Value.ARRAY) {
-            return getExpressionColumns(session, (ValueArray) getValue(session));
-        }
-        return super.getExpressionColumns(session);
-    }
 }

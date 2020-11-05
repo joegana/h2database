@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.store;
@@ -61,7 +61,7 @@ public class FreeSpaceList {
                 return result * blockSize;
             }
         }
-        throw DataUtils.newIllegalStateException(
+        throw DataUtils.newMVStoreException(
                 DataUtils.ERROR_INTERNAL,
                 "Could not find a free page to allocate");
     }
@@ -85,12 +85,12 @@ public class FreeSpaceList {
             i++;
         }
         if (found == null) {
-            throw DataUtils.newIllegalStateException(
+            throw DataUtils.newMVStoreException(
                     DataUtils.ERROR_INTERNAL,
                     "Cannot find spot to mark as used in free list");
         }
         if (start + required > found.start + found.length) {
-            throw DataUtils.newIllegalStateException(
+            throw DataUtils.newMVStoreException(
                     DataUtils.ERROR_INTERNAL,
                     "Runs over edge of free space");
         }
@@ -136,7 +136,7 @@ public class FreeSpaceList {
             i++;
         }
         if (found == null) {
-            throw DataUtils.newIllegalStateException(
+            throw DataUtils.newMVStoreException(
                     DataUtils.ERROR_INTERNAL,
                     "Cannot find spot to mark as unused in free list");
         }
@@ -172,7 +172,7 @@ public class FreeSpaceList {
 
     private int getBlockCount(int length) {
         if (length <= 0) {
-            throw DataUtils.newIllegalStateException(
+            throw DataUtils.newMVStoreException(
                     DataUtils.ERROR_INTERNAL, "Free space invalid length");
         }
         return MathUtils.roundUpInt(length, blockSize) / blockSize;

@@ -1,18 +1,19 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.bnf.context;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 
-import org.h2.command.Parser;
+import org.h2.engine.Session;
+import org.h2.jdbc.JdbcConnection;
+import org.h2.util.ParserUtil;
 import org.h2.util.StringUtils;
 import org.h2.util.Utils;
 
@@ -29,94 +30,108 @@ public class DbContents {
     private boolean isPostgreSQL;
     private boolean isDerby;
     private boolean isSQLite;
-    private boolean isH2ModeMySQL;
     private boolean isMySQL;
     private boolean isFirebird;
     private boolean isMSSQLServer;
     private boolean isDB2;
 
+    private boolean databaseToUpper, databaseToLower;
+
+    private boolean mayHaveStandardViews = true;
+
     /**
-     * @return The default schema.
+     * @return the default schema.
      */
     public DbSchema getDefaultSchema() {
         return defaultSchema;
     }
 
     /**
-     * @return True if this is an Apache Derby database.
+     * @return true if this is an Apache Derby database.
      */
     public boolean isDerby() {
         return isDerby;
     }
 
     /**
-     * @return True if this is a Firebird database.
+     * @return true if this is a Firebird database.
      */
     public boolean isFirebird() {
         return isFirebird;
     }
 
     /**
-     * @return True if this is a H2 database.
+     * @return true if this is a H2 database.
      */
     public boolean isH2() {
         return isH2;
     }
 
     /**
-     * @return True if this is a H2 database in MySQL mode.
-     */
-    public boolean isH2ModeMySQL() {
-        return isH2ModeMySQL;
-    }
-
-    /**
-     * @return True if this is a MS SQL Server database.
+     * @return true if this is a MS SQL Server database.
      */
     public boolean isMSSQLServer() {
         return isMSSQLServer;
     }
 
     /**
-     * @return True if this is a MySQL database.
+     * @return true if this is a MySQL database.
      */
     public boolean isMySQL() {
         return isMySQL;
     }
 
     /**
-     * @return True if this is an Oracle database.
+     * @return true if this is an Oracle database.
      */
     public boolean isOracle() {
         return isOracle;
     }
 
     /**
-     * @return True if this is a PostgreSQL database.
+     * @return true if this is a PostgreSQL database.
      */
     public boolean isPostgreSQL() {
         return isPostgreSQL;
     }
 
     /**
-     * @return True if this is an SQLite database.
+     * @return true if this is an SQLite database.
      */
     public boolean isSQLite() {
         return isSQLite;
     }
 
     /**
-     * @return True if this is an IBM DB2 database.
+     * @return true if this is an IBM DB2 database.
      */
     public boolean isDB2() {
         return isDB2;
     }
 
     /**
-     * @return The list of schemas.
+     * @return the list of schemas.
      */
     public DbSchema[] getSchemas() {
         return schemas;
+    }
+
+    /**
+     * Returns whether standard INFORMATION_SCHEMA.VIEWS may be supported.
+     *
+     * @return whether standard INFORMATION_SCHEMA.VIEWS may be supported
+     */
+    public boolean mayHaveStandardViews() {
+        return mayHaveStandardViews;
+    }
+
+    /**
+     * @param mayHaveStandardViews
+     *            whether standard INFORMATION_SCHEMA.VIEWS is detected as
+     *            supported
+     */
+    public void setMayHaveStandardViews(boolean mayHaveStandardViews) {
+        this.mayHaveStandardViews = mayHaveStandardViews;
     }
 
     /**
@@ -128,19 +143,6 @@ public class DbContents {
     public synchronized void readContents(String url, Connection conn)
             throws SQLException {
         isH2 = url.startsWith("jdbc:h2:");
-        if (isH2) {
-            PreparedStatement prep = conn.prepareStatement(
-                    "SELECT UPPER(VALUE) FROM INFORMATION_SCHEMA.SETTINGS " +
-                    "WHERE NAME=?");
-            prep.setString(1, "MODE");
-            ResultSet rs = prep.executeQuery();
-            rs.next();
-            if ("MYSQL".equals(rs.getString(1))) {
-                isH2ModeMySQL = true;
-            }
-            rs.close();
-            prep.close();
-        }
         isDB2 = url.startsWith("jdbc:db2:");
         isSQLite = url.startsWith("jdbc:sqlite:");
         isOracle = url.startsWith("jdbc:oracle:");
@@ -151,6 +153,17 @@ public class DbContents {
         isDerby = url.startsWith("jdbc:derby:");
         isFirebird = url.startsWith("jdbc:firebirdsql:");
         isMSSQLServer = url.startsWith("jdbc:sqlserver:");
+        if (isH2) {
+            Session.StaticSettings settings = ((JdbcConnection) conn).getStaticSettings();
+            databaseToUpper = settings.databaseToUpper;
+            databaseToLower = settings.databaseToLower;
+        }else if (isMySQL || isPostgreSQL) {
+            databaseToUpper = false;
+            databaseToLower = true;
+        } else {
+            databaseToUpper = true;
+            databaseToLower = false;
+        }
         DatabaseMetaData meta = conn.getMetaData();
         String defaultSchemaName = getDefaultSchemaName(meta);
         String[] schemaNames = getSchemaNames(meta);
@@ -240,7 +253,9 @@ public class DbContents {
     private String getDefaultSchemaName(DatabaseMetaData meta) {
         String defaultSchemaName = "";
         try {
-            if (isOracle) {
+            if (isH2) {
+                return meta.storesLowerCaseIdentifiers() ? "public" : "PUBLIC";
+            } else if (isOracle) {
                 return meta.getUserName();
             } else if (isPostgreSQL) {
                 return "public";
@@ -251,22 +266,14 @@ public class DbContents {
             } else if (isFirebird) {
                 return null;
             }
-            ResultSet rs = meta.getSchemas();
-            int index = rs.findColumn("IS_DEFAULT");
-            while (rs.next()) {
-                if (rs.getBoolean(index)) {
-                    defaultSchemaName = rs.getString("TABLE_SCHEM");
-                }
-            }
         } catch (SQLException e) {
-            // IS_DEFAULT not found
+            // Ignore
         }
         return defaultSchemaName;
     }
 
     /**
      * Add double quotes around an identifier if required.
-     * For the H2 database, all identifiers are quoted.
      *
      * @param identifier the identifier
      * @return the quoted identifier
@@ -275,10 +282,10 @@ public class DbContents {
         if (identifier == null) {
             return null;
         }
-        if (isH2 && !isH2ModeMySQL) {
-            return Parser.quoteIdentifier(identifier);
+        if (ParserUtil.isSimpleIdentifier(identifier, databaseToUpper, databaseToLower)) {
+            return identifier;
         }
-        return StringUtils.toUpperEnglish(identifier);
+        return StringUtils.quoteIdentifier(identifier);
     }
 
 }

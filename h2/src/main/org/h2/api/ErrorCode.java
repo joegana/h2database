@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.api;
@@ -134,6 +134,15 @@ public class ErrorCode {
     public static final int DIVISION_BY_ZERO_1 = 22012;
 
     /**
+     * The error with code <code>22013</code> is thrown when preceding or
+     * following size in a window function is null or negative. Example:
+     * <pre>
+     * FIRST_VALUE(N) OVER(ORDER BY N ROWS -1 PRECEDING)
+     * </pre>
+     */
+    public static final int INVALID_PRECEDING_OR_FOLLOWING_1 = 22013;
+
+    /**
      * The error with code <code>22018</code> is thrown when
      * trying to convert a value to a data type where the conversion is
      * undefined, or when an error occurred trying to convert. Example:
@@ -202,6 +211,17 @@ public class ErrorCode {
      * </pre>
      */
     public static final int ENUM_DUPLICATE = 22033;
+
+    /**
+     * The error with code <code>22034</code> is thrown when an
+     * attempt is made to read non-existing element of an array.
+     *
+     * Example:
+     * <pre>
+     * VALUES ARRAY[1, 2][3]
+     * </pre>
+     */
+    public static final int ARRAY_ELEMENT_ERROR_2 = 22034;
 
     // 23: constraint violation
 
@@ -272,7 +292,7 @@ public class ErrorCode {
      * The error with code <code>23513</code> is thrown when
      * a check constraint is violated. Example:
      * <pre>
-     * CREATE TABLE TEST(ID INT CHECK ID&gt;0);
+     * CREATE TABLE TEST(ID INT CHECK (ID&gt;0));
      * INSERT INTO TEST VALUES(0);
      * </pre>
      */
@@ -280,7 +300,7 @@ public class ErrorCode {
 
     /**
      * The error with code <code>23514</code> is thrown when
-     * evaluation of a check constraint resulted in a error.
+     * evaluation of a check constraint resulted in an error.
      */
     public static final int CHECK_CONSTRAINT_INVALID = 23514;
 
@@ -308,7 +328,7 @@ public class ErrorCode {
      * sessions are also possible. To solve deadlock problems, an application
      * should lock tables always in the same order, such as always lock table A
      * before locking table B. For details, see <a
-     * href="http://en.wikipedia.org/wiki/Deadlock">Wikipedia Deadlock</a>.
+     * href="https://en.wikipedia.org/wiki/Deadlock">Wikipedia Deadlock</a>.
      */
     public static final int DEADLOCK_1 = 40001;
 
@@ -359,6 +379,30 @@ public class ErrorCode {
     public static final int TABLE_OR_VIEW_NOT_FOUND_1 = 42102;
 
     /**
+     * The error with code <code>42103</code> is thrown when
+     * trying to query, modify or drop a table or view that does not exists
+     * in this schema and database but similar names were found. A common cause
+     * is that the names are written in different case.
+     * Example:
+     * <pre>
+     * SELECT * FROM ABC;
+     * </pre>
+     */
+    public static final int TABLE_OR_VIEW_NOT_FOUND_WITH_CANDIDATES_2 = 42103;
+
+    /**
+     * The error with code <code>42104</code> is thrown when
+     * trying to query, modify or drop a table or view that does not exists
+     * in this schema and database but it is empty anyway. A common cause is
+     * that the wrong database was opened.
+     * Example:
+     * <pre>
+     * SELECT * FROM ABC;
+     * </pre>
+     */
+    public static final int TABLE_OR_VIEW_NOT_FOUND_DATABASE_EMPTY_1 = 42104;
+
+    /**
      * The error with code <code>42111</code> is thrown when
      * trying to create an index if an index with the same name already exists.
      * Example:
@@ -405,13 +449,48 @@ public class ErrorCode {
     /**
      * The error with code <code>42131</code> is thrown when
      * identical expressions should be used, but different
-     * exceptions were found.
+     * expressions were found.
      * Example:
      * <pre>
      * SELECT MODE(A ORDER BY B) FROM TEST;
      * </pre>
      */
     public static final int IDENTICAL_EXPRESSIONS_SHOULD_BE_USED = 42131;
+
+    /**
+     * The error with code <code>42602</code> is thrown when
+     * invalid name of identifier is used.
+     * Example:
+     * <pre>
+     * statement.enquoteIdentifier("\"", true);
+     * </pre>
+     */
+    public static final int INVALID_NAME_1 = 42602;
+
+    /**
+     * The error with code <code>42622</code> is thrown when
+     * name of identifier is too long.
+     * Example:
+     * <pre>
+     * char[] c = new char[1000];
+     * Arrays.fill(c, 'A');
+     * statement.executeQuery("SELECT 1 " + new String(c));
+     * </pre>
+     */
+    public static final int NAME_TOO_LONG_2 = 42622;
+
+    // 54: program limit exceeded
+
+    /**
+     * The error with code <code>54011</code> is thrown when
+     * too many columns were specified in a table, select statement,
+     * or row value.
+     * Example:
+     * <pre>
+     * CREATE TABLE TEST(C1 INTEGER, C2 INTEGER, ..., C20000 INTEGER);
+     * </pre>
+     */
+    public static final int TOO_MANY_COLUMNS_1 = 54011;
 
     // 0A: feature not supported
 
@@ -530,10 +609,9 @@ public class ErrorCode {
 
     /**
      * The error with code <code>90005</code> is thrown when
-     * trying to create a trigger and using the combination of SELECT
-     * and FOR EACH ROW, which we do not support.
+     * trying to create a trigger with invalid combination of flags.
      */
-    public static final int TRIGGER_SELECT_AND_ROW_BASED_NOT_SUPPORTED = 90005;
+    public static final int INVALID_TRIGGER_FLAGS_1 = 90005;
 
     /**
      * The error with code <code>90006</code> is thrown when
@@ -563,7 +641,7 @@ public class ErrorCode {
      * trying to create a sequence with an invalid combination
      * of attributes (min value, max value, start value, etc).
      */
-    public static final int SEQUENCE_ATTRIBUTES_INVALID = 90009;
+    public static final int SEQUENCE_ATTRIBUTES_INVALID_7 = 90009;
 
     /**
      * The error with code <code>90010</code> is thrown when
@@ -602,13 +680,11 @@ public class ErrorCode {
     public static final int PARAMETER_NOT_SET_1 = 90012;
 
     /**
-     * The error with code <code>90013</code> is thrown when
-     * trying to open a database that does not exist using the flag
-     * IFEXISTS=TRUE, or when trying to access a database object with a catalog
-     * name that does not match the database name. Example:
+     * The error with code <code>90013</code> is thrown when when trying to access
+     * a database object with a catalog name that does not match the database
+     * name.
      * <pre>
-     * CREATE TABLE TEST(ID INT);
-     * SELECT XYZ.PUBLIC.TEST.ID FROM TEST;
+     * SELECT * FROM database_that_does_not_exist.table_name
      * </pre>
      */
     public static final int DATABASE_NOT_FOUND_1 = 90013;
@@ -728,12 +804,21 @@ public class ErrorCode {
     public static final int FUNCTION_NOT_FOUND_1 = 90022;
 
     /**
-     * The error with code <code>90023</code> is thrown when
-     * trying to set a primary key on a nullable column.
-     * Example:
+     * The error with code <code>90023</code> is thrown when trying to set a
+     * primary key on a nullable column or when trying to drop NOT NULL
+     * constraint on primary key or identity column.
+     * Examples:
      * <pre>
      * CREATE TABLE TEST(ID INT, NAME VARCHAR);
      * ALTER TABLE TEST ADD CONSTRAINT PK PRIMARY KEY(ID);
+     * </pre>
+     * <pre>
+     * CREATE TABLE TEST(ID INT PRIMARY KEY, NAME VARCHAR);
+     * ALTER TABLE TEST ALTER COLUMN ID DROP NOT NULL;
+     * </pre>
+     * <pre>
+     * CREATE TABLE TEST(ID INT GENERATED ALWAYS AS IDENTITY, NAME VARCHAR);
+     * ALTER TABLE TEST ALTER COLUMN ID DROP NOT NULL;
      * </pre>
      */
     public static final int COLUMN_MUST_NOT_BE_NULLABLE_1 = 90023;
@@ -993,30 +1078,15 @@ public class ErrorCode {
      */
     public static final int WRONG_PASSWORD_FORMAT = 90050;
 
-    /**
-     * The error with code <code>90051</code> is thrown when
-     * trying to use a scale that is > precision.
-     * Example:
-     * <pre>
-     * CREATE TABLE TABLE1 ( FAIL NUMBER(6,24) );
-     * </pre>
-     */
-    public static final int INVALID_VALUE_SCALE_PRECISION = 90051;
+    // 90051 was removed
 
     /**
-     * The error with code <code>90052</code> is thrown when
-     * a subquery that is used as a value contains more than one column.
-     * Example of wrong usage:
+     * The error with code <code>90052</code> is thrown when a single-column
+     * subquery is expected but a subquery with other number of columns was
+     * specified.
+     * Example:
      * <pre>
-     * CREATE TABLE TEST(ID INT);
-     * INSERT INTO TEST VALUES(1), (2);
-     * SELECT * FROM TEST WHERE ID IN (SELECT 1, 2 FROM DUAL);
-     * </pre>
-     * Correct:
-     * <pre>
-     * CREATE TABLE TEST(ID INT);
-     * INSERT INTO TEST VALUES(1), (2);
-     * SELECT * FROM TEST WHERE ID IN (1, 2);
+     * VALUES ARRAY(SELECT A, B FROM TEST)
      * </pre>
      */
     public static final int SUBQUERY_IS_NOT_SINGLE_COLUMN = 90052;
@@ -1387,11 +1457,14 @@ public class ErrorCode {
     /**
      * The error with code <code>90085</code> is thrown when
      * trying to manually drop an index that was generated by the system
-     * because of a unique or referential constraint. To find out what
-     * constraint causes the problem, run:
+     * because of a unique or referential constraint. To find
+     * the owner of the index without attempt to drop it run
      * <pre>
-     * SELECT * FROM INFORMATION_SCHEMA.CONSTRAINTS
-     * WHERE UNIQUE_INDEX_NAME = '&lt;index name&gt;';
+     * SELECT CONSTRAINT_SCHEMA, CONSTRAINT_NAME
+     * FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+     * WHERE INDEX_SCHEMA = '&lt;index schema&gt;'
+     * AND INDEX_NAME = '&lt;index name&gt;'
+     * FETCH FIRST ROW ONLY
      * </pre>
      * Example of wrong usage:
      * <pre>
@@ -1641,14 +1714,14 @@ public class ErrorCode {
 
     /**
      * The error with code <code>90110</code> is thrown when
-     * trying to compare an array value against a non-array value.
+     * trying to compare values of incomparable data types.
      * Example:
      * <pre>
      * CREATE TABLE test (id INT NOT NULL, name VARCHAR);
      * select * from test where id = (1, 2);
      * </pre>
      */
-    public static final int COMPARING_ARRAY_TO_SCALAR = 90110;
+    public static final int TYPES_ARE_NOT_COMPARABLE_2 = 90110;
 
     /**
      * The error with code <code>90111</code> is thrown when
@@ -1748,7 +1821,13 @@ public class ErrorCode {
      * CREATE DOMAIN EMAIL AS VARCHAR CHECK LOCATE('@', VALUE) > 0;
      * </pre>
      */
-    public static final int USER_DATA_TYPE_ALREADY_EXISTS_1 = 90119;
+    public static final int DOMAIN_ALREADY_EXISTS_1 = 90119;
+
+    /**
+     * Deprecated since 1.4.198. Use {@link #DOMAIN_ALREADY_EXISTS_1} instead.
+     */
+    @Deprecated
+    public static final int USER_DATA_TYPE_ALREADY_EXISTS_1 = DOMAIN_ALREADY_EXISTS_1;
 
     /**
      * The error with code <code>90120</code> is thrown when
@@ -1758,7 +1837,13 @@ public class ErrorCode {
      * DROP DOMAIN UNKNOWN;
      * </pre>
      */
-    public static final int USER_DATA_TYPE_NOT_FOUND_1 = 90120;
+    public static final int DOMAIN_NOT_FOUND_1 = 90120;
+
+    /**
+     * Deprecated since 1.4.198. Use {@link #DOMAIN_NOT_FOUND_1} instead.
+     */
+    @Deprecated
+    public static final int USER_DATA_TYPE_NOT_FOUND_1 = DOMAIN_NOT_FOUND_1;
 
     /**
      * The error with code <code>90121</code> is thrown when
@@ -1940,7 +2025,7 @@ public class ErrorCode {
      * The error with code <code>90137</code> is thrown when
      * trying to assign a value to something that is not a variable.
      * <pre>
-     * SELECT AMOUNT, SET(@V, IFNULL(@V, 0)+AMOUNT) FROM TEST;
+     * SELECT AMOUNT, SET(@V, COALESCE(@V, 0)+AMOUNT) FROM TEST;
      * </pre>
      */
     public static final int CAN_ONLY_ASSIGN_TO_VARIABLE_1 = 90137;
@@ -2002,7 +2087,6 @@ public class ErrorCode {
     /**
      * The error with code <code>90143</code> is thrown when
      * trying to fetch a row from the primary index and the row is not there.
-     * Can happen in MULTI_THREADED=1 case.
      */
     public static final int ROW_NOT_FOUND_IN_PRIMARY_INDEX = 90143;
 
@@ -2018,8 +2102,139 @@ public class ErrorCode {
      */
     public static final int AUTHENTICATOR_NOT_AVAILABLE = 90144;
 
+    /**
+     * The error with code <code>90145</code> is thrown when trying to execute a
+     * SELECT statement with non-window aggregates, DISTINCT, GROUP BY, or
+     * HAVING clauses together with FOR UPDATE clause.
+     *
+     * <pre>
+     * SELECT DISTINCT NAME FOR UPDATE;
+     * SELECT MAX(VALUE) FOR UPDATE;
+     * </pre>
+     */
+    public static final int FOR_UPDATE_IS_NOT_ALLOWED_IN_DISTINCT_OR_GROUPED_SELECT = 90145;
 
-    // next is 90145
+    /**
+     * The error with code <code>90146</code> is thrown when trying to open a
+     * database that does not exist using the flag IFEXISTS=TRUE
+     * <pre>
+     * jdbc:h2:./database_that_does_not_exist
+     * </pre>
+     */
+    public static final int DATABASE_NOT_FOUND_WITH_IF_EXISTS_1 = 90146;
+
+    /**
+     * The error with code <code>90147</code> is thrown when trying to execute a
+     * statement which closes the transaction (such as commit and rollback) and
+     * autocommit mode is on.
+     *
+     * @see org.h2.engine.SysProperties#FORCE_AUTOCOMMIT_OFF_ON_COMMIT
+     */
+    public static final int METHOD_DISABLED_ON_AUTOCOMMIT_TRUE = 90147;
+
+    /**
+     * The error with code <code>90148</code> is thrown when trying to access
+     * the current value of a sequence before execution of NEXT VALUE FOR
+     * sequenceName in the current session. Example:
+     *
+     * <pre>
+     * SELECT CURRENT VALUE FOR SEQUENCE XYZ;
+     * </pre>
+     */
+    public static final int CURRENT_SEQUENCE_VALUE_IS_NOT_DEFINED_IN_SESSION_1 = 90148;
+
+    /**
+     * The error with code <code>90149</code> is thrown when trying to open a
+     * database that does not exist remotely without enabling remote database
+     * creation first.
+     * <pre>
+     * jdbc:h2:./database_that_does_not_exist
+     * </pre>
+     */
+    public static final int REMOTE_DATABASE_NOT_FOUND_1 = 90149;
+
+    /**
+     * The error with code <code>90150</code> is thrown when
+     * trying to use an invalid precision.
+     * Example:
+     * <pre>
+     * CREATE TABLE TABLE1 ( FAIL INTERVAL YEAR(20) );
+     * </pre>
+     */
+    public static final int INVALID_VALUE_PRECISION = 90150;
+
+    /**
+     * The error with code <code>90151</code> is thrown when
+     * trying to use an invalid scale or fractional seconds precision.
+     * Example:
+     * <pre>
+     * CREATE TABLE TABLE1 ( FAIL TIME(10) );
+     * </pre>
+     */
+    public static final int INVALID_VALUE_SCALE = 90151;
+
+    /**
+     * The error with code <code>90152</code> is thrown when trying to manually
+     * drop a unique or primary key constraint that is referenced by a foreign
+     * key constraint without a CASCADE clause.
+     *
+     * <pre>
+     * CREATE TABLE PARENT(ID INT CONSTRAINT P1 PRIMARY KEY);
+     * CREATE TABLE CHILD(ID INT CONSTRAINT P2 PRIMARY KEY, CHILD INT CONSTRAINT C REFERENCES PARENT);
+     * ALTER TABLE PARENT DROP CONSTRAINT P1 RESTRICT;
+     * </pre>
+     */
+    public static final int CONSTRAINT_IS_USED_BY_CONSTRAINT_2 = 90152;
+
+    /**
+     * The error with code <code>90153</code> is thrown when trying to reference
+     * a column of another data type when data types aren't comparable or don't
+     * have a session-independent compare order between each other.
+     *
+     * <pre>
+     * CREATE TABLE PARENT(T TIMESTAMP UNIQUE);
+     * CREATE TABLE CHILD(T TIMESTAMP WITH TIME ZONE REFERENCES PARENT(T));
+     * </pre>
+     */
+    public static final int UNCOMPARABLE_REFERENCED_COLUMN_2 = 90153;
+
+    /**
+     * The error with code <code>90154</code> is thrown when trying to assign a
+     * value to a generated column.
+     *
+     * <pre>
+     * CREATE TABLE TEST(A INT, B INT GENERATED ALWAYS AS (A + 1));
+     * INSERT INTO TEST(A, B) VALUES (1, 1);
+     * </pre>
+     */
+    public static final int GENERATED_COLUMN_CANNOT_BE_ASSIGNED_1 = 90154;
+
+    /**
+     * The error with code <code>90155</code> is thrown when trying to create a
+     * referential constraint that can update a referenced generated column.
+     *
+     * <pre>
+     * CREATE TABLE PARENT(ID INT PRIMARY KEY, K INT GENERATED ALWAYS AS (ID) UNIQUE);
+     * CREATE TABLE CHILD(ID INT PRIMARY KEY, P INT);
+     * ALTER TABLE CHILD ADD FOREIGN KEY(P) REFERENCES PARENT(K) ON DELETE SET NULL;
+     * </pre>
+     */
+    public static final int GENERATED_COLUMN_CANNOT_BE_UPDATABLE_BY_CONSTRAINT_2 = 90155;
+
+    /**
+     * The error with code <code>90156</code> is thrown when trying to create a
+     * view or a table from a select and some expression doesn't have a column
+     * name or alias when it is required by a compatibility mode.
+     *
+     * <pre>
+     * SET MODE DB2;
+     * CREATE TABLE T1(A INT, B INT);
+     * CREATE TABLE T2 AS (SELECT A + B FROM T1) WITH DATA;
+     * </pre>
+     */
+    public static final int COLUMN_ALIAS_IS_NOT_SPECIFIED_1 = 90156;
+
+    // next is 90157
 
     private ErrorCode() {
         // utility class
@@ -2045,6 +2260,8 @@ public class ErrorCode {
         case SYNTAX_ERROR_2:
         case TABLE_OR_VIEW_ALREADY_EXISTS_1:
         case TABLE_OR_VIEW_NOT_FOUND_1:
+        case TABLE_OR_VIEW_NOT_FOUND_WITH_CANDIDATES_2:
+        case TABLE_OR_VIEW_NOT_FOUND_DATABASE_EMPTY_1:
         case VALUE_TOO_LONG_2:
             return true;
         }
@@ -2072,9 +2289,14 @@ public class ErrorCode {
         // 21: cardinality violation
         case COLUMN_COUNT_DOES_NOT_MATCH: return "21S02";
 
+        // 22: data exception
+        case ARRAY_ELEMENT_ERROR_2: return "2202E";
+
         // 42: syntax error or access rule violation
         case TABLE_OR_VIEW_ALREADY_EXISTS_1: return "42S01";
         case TABLE_OR_VIEW_NOT_FOUND_1: return "42S02";
+        case TABLE_OR_VIEW_NOT_FOUND_WITH_CANDIDATES_2: return "42S03";
+        case TABLE_OR_VIEW_NOT_FOUND_DATABASE_EMPTY_1: return "42S04";
         case INDEX_ALREADY_EXISTS_1: return "42S11";
         case INDEX_NOT_FOUND_1: return "42S12";
         case DUPLICATE_COLUMN_NAME_1: return "42S21";

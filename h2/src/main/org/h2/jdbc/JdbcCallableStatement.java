@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.jdbc;
@@ -19,6 +19,7 @@ import java.sql.Ref;
 import java.sql.ResultSetMetaData;
 import java.sql.RowId;
 import java.sql.SQLException;
+import java.sql.SQLType;
 import java.sql.SQLXML;
 import java.sql.Time;
 import java.sql.Timestamp;
@@ -38,16 +39,14 @@ import org.h2.value.ValueNull;
  * @author Sergi Vladykin
  * @author Thomas Mueller
  */
-public class JdbcCallableStatement extends JdbcPreparedStatement implements
-        CallableStatement, JdbcCallableStatementBackwardsCompat {
+public final class JdbcCallableStatement extends JdbcPreparedStatement implements CallableStatement {
 
     private BitSet outParameters;
     private int maxOutParameters;
     private HashMap<String, Integer> namedParameters;
 
-    JdbcCallableStatement(JdbcConnection conn, String sql, int id,
-            int resultSetType, int resultSetConcurrency) {
-        super(conn, sql, id, resultSetType, resultSetConcurrency, false, false);
+    JdbcCallableStatement(JdbcConnection conn, String sql, int id, int resultSetType, int resultSetConcurrency) {
+        super(conn, sql, id, resultSetType, resultSetConcurrency, null);
         setTrace(session.getTrace(), TraceObject.CALLABLE_STATEMENT, id);
     }
 
@@ -1116,6 +1115,38 @@ public class JdbcCallableStatement extends JdbcPreparedStatement implements
     public void setObject(String parameterName, Object x, int targetSqlType,
             int scale) throws SQLException {
         setObject(getIndexForName(parameterName), x, targetSqlType, scale);
+    }
+
+    /**
+     * Sets the value of a parameter. The object is converted, if required, to
+     * the specified data type before sending to the database.
+     * Objects of unknown classes are serialized (on the client side).
+     *
+     * @param parameterName the parameter name
+     * @param x the value, null is allowed
+     * @param targetSqlType the type
+     * @throws SQLException if this object is closed
+     */
+    @Override
+    public void setObject(String parameterName, Object x, SQLType targetSqlType) throws SQLException {
+        setObject(getIndexForName(parameterName), x, targetSqlType);
+    }
+
+    /**
+     * Sets the value of a parameter. The object is converted, if required, to
+     * the specified data type before sending to the database.
+     * Objects of unknown classes are serialized (on the client side).
+     *
+     * @param parameterName the parameter name
+     * @param x the value, null is allowed
+     * @param targetSqlType the type
+     * @param scaleOrLength is ignored
+     * @throws SQLException if this object is closed
+     */
+    @Override
+    public void setObject(String parameterName, Object x, SQLType targetSqlType, int scaleOrLength)
+            throws SQLException {
+        setObject(getIndexForName(parameterName), x, targetSqlType, scaleOrLength);
     }
 
     /**

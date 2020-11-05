@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.store.fs;
@@ -8,9 +8,11 @@ package org.h2.store.fs;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import org.h2.store.fs.disk.FilePathDisk;
 import org.h2.util.MathUtils;
 
 /**
@@ -21,9 +23,9 @@ import org.h2.util.MathUtils;
  */
 public abstract class FilePath {
 
-    private static FilePath defaultProvider;
+    private static final FilePath defaultProvider;
 
-    private static ConcurrentHashMap<String, FilePath> providers;
+    private static final ConcurrentHashMap<String, FilePath> providers;
 
     /**
      * The prefix for temporary files.
@@ -35,7 +37,39 @@ public abstract class FilePath {
      * The complete path (which may be absolute or relative, depending on the
      * file system).
      */
-    protected String name;
+    public String name;
+
+    static {
+        FilePath def = null;
+        ConcurrentHashMap<String, FilePath> map = new ConcurrentHashMap<>();
+        for (String c : new String[] {
+                "org.h2.store.fs.disk.FilePathDisk",
+                "org.h2.store.fs.mem.FilePathMem",
+                "org.h2.store.fs.mem.FilePathMemLZF",
+                "org.h2.store.fs.niomem.FilePathNioMem",
+                "org.h2.store.fs.niomem.FilePathNioMemLZF",
+                "org.h2.store.fs.split.FilePathSplit",
+                "org.h2.store.fs.niomapped.FilePathNioMapped",
+                "org.h2.store.fs.async.FilePathAsync",
+                "org.h2.store.fs.zip.FilePathZip",
+                "org.h2.store.fs.retry.FilePathRetryOnInterrupt"
+        }) {
+            try {
+                FilePath p = (FilePath) Class.forName(c).getDeclaredConstructor().newInstance();
+                map.put(p.getScheme(), p);
+                if (p.getClass() == FilePathDisk.class) {
+                    map.put("nio", p);
+                }
+                if (def == null) {
+                    def = p;
+                }
+            } catch (Exception e) {
+                // ignore - the files may be excluded in purpose
+            }
+        }
+        defaultProvider = def;
+        providers = map;
+    }
 
     /**
      * Get the file path object for the given path.
@@ -47,7 +81,6 @@ public abstract class FilePath {
     public static FilePath get(String path) {
         path = path.replace('\\', '/');
         int index = path.indexOf(':');
-        registerDefaultProviders();
         if (index < 2) {
             // use the default provider if no prefix or
             // only a single character (drive name)
@@ -62,42 +95,12 @@ public abstract class FilePath {
         return p.getPath(path);
     }
 
-    private static void registerDefaultProviders() {
-        if (providers == null || defaultProvider == null) {
-            ConcurrentHashMap<String, FilePath> map = new ConcurrentHashMap<>();
-            for (String c : new String[] {
-                    "org.h2.store.fs.FilePathDisk",
-                    "org.h2.store.fs.FilePathMem",
-                    "org.h2.store.fs.FilePathMemLZF",
-                    "org.h2.store.fs.FilePathNioMem",
-                    "org.h2.store.fs.FilePathNioMemLZF",
-                    "org.h2.store.fs.FilePathSplit",
-                    "org.h2.store.fs.FilePathNio",
-                    "org.h2.store.fs.FilePathNioMapped",
-                    "org.h2.store.fs.FilePathZip",
-                    "org.h2.store.fs.FilePathRetryOnInterrupt"
-            }) {
-                try {
-                    FilePath p = (FilePath) Class.forName(c).getDeclaredConstructor().newInstance();
-                    map.put(p.getScheme(), p);
-                    if (defaultProvider == null) {
-                        defaultProvider = p;
-                    }
-                } catch (Exception e) {
-                    // ignore - the files may be excluded in purpose
-                }
-            }
-            providers = map;
-        }
-    }
-
     /**
      * Register a file provider.
      *
      * @param provider the file provider
      */
     public static void register(FilePath provider) {
-        registerDefaultProviders();
         providers.put(provider.getScheme(), provider);
     }
 
@@ -107,7 +110,6 @@ public abstract class FilePath {
      * @param provider the file provider
      */
     public static void unregister(FilePath provider) {
-        registerDefaultProviders();
         providers.remove(provider.getScheme());
     }
 
@@ -217,14 +219,37 @@ public abstract class FilePath {
      * @param append if true, the file will grow, if false, the file will be
      *            truncated first
      * @return the output stream
+     * @throws IOException If an I/O error occurs
      */
-    public abstract OutputStream newOutputStream(boolean append) throws IOException;
+    public OutputStream newOutputStream(boolean append) throws IOException {
+        return newFileChannelOutputStream(open("rw"), append);
+    }
+
+    /**
+     * Create a new output stream from the channel.
+     *
+     * @param channel the file channel
+     * @param append true for append mode, false for truncate and overwrite
+     * @return the output stream
+     * @throws IOException on I/O exception
+     */
+    public static final OutputStream newFileChannelOutputStream(FileChannel channel, boolean append)
+            throws IOException {
+        if (append) {
+            channel.position(channel.size());
+        } else {
+            channel.position(0);
+            channel.truncate(0);
+        }
+        return Channels.newOutputStream(channel);
+    }
 
     /**
      * Open a random access file object.
      *
      * @param mode the access mode. Supported are r, rw, rws, rwd
      * @return the file object
+     * @throws IOException If an I/O error occurs
      */
     public abstract FileChannel open(String mode) throws IOException;
 
@@ -232,8 +257,11 @@ public abstract class FilePath {
      * Create an input stream to read from the file.
      *
      * @return the input stream
+     * @throws IOException If an I/O error occurs
      */
-    public abstract InputStream newInputStream() throws IOException;
+    public InputStream newInputStream() throws IOException {
+        return Channels.newInputStream(open("r"));
+    }
 
     /**
      * Disable the ability to write.
@@ -246,14 +274,11 @@ public abstract class FilePath {
      * Create a new temporary file.
      *
      * @param suffix the suffix
-     * @param deleteOnExit if the file should be deleted when the virtual
-     *            machine exists
      * @param inTempDir if the file should be stored in the temporary directory
      * @return the name of the created file
      */
     @SuppressWarnings("unused")
-    public FilePath createTempFile(String suffix, boolean deleteOnExit,
-            boolean inTempDir) throws IOException {
+    public FilePath createTempFile(String suffix, boolean inTempDir) throws IOException {
         while (true) {
             FilePath p = getPath(name + getNextTempFileNamePart(false) + suffix);
             if (p.exists() || !p.createFile()) {
@@ -272,7 +297,7 @@ public abstract class FilePath {
      * @param newRandom if the random part of the filename should change
      * @return the file name part
      */
-    protected static synchronized String getNextTempFileNamePart(
+    private static synchronized String getNextTempFileNamePart(
             boolean newRandom) {
         if (newRandom || tempRandom == null) {
             tempRandom = MathUtils.randomInt(Integer.MAX_VALUE) + ".";
@@ -303,7 +328,7 @@ public abstract class FilePath {
     /**
      * Convert a file to a path. This is similar to
      * <code>java.nio.file.spi.FileSystemProvider.getPath</code>, but may
-     * return an object even if the scheme doesn't match in case of the the
+     * return an object even if the scheme doesn't match in case of the
      * default file provider.
      *
      * @param path the path

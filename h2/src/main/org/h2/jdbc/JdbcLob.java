@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.jdbc;
@@ -16,6 +16,7 @@ import java.sql.SQLException;
 import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
 import org.h2.message.TraceObject;
+import org.h2.mvstore.DataUtils;
 import org.h2.util.IOUtils;
 import org.h2.util.Task;
 import org.h2.value.Value;
@@ -39,7 +40,7 @@ public abstract class JdbcLob extends TraceObject {
             try {
                 task.get();
             } catch (Exception e) {
-                throw DbException.convertToIOException(e);
+                throw DataUtils.convertToIOException(e);
             }
         }
     }
@@ -69,8 +70,19 @@ public abstract class JdbcLob extends TraceObject {
         CLOSED;
     }
 
+    /**
+     * JDBC connection.
+     */
     final JdbcConnection conn;
+
+    /**
+     * Value.
+     */
     Value value;
+
+    /**
+     * State.
+     */
     State state;
 
     JdbcLob(JdbcConnection conn, Value value, State state, int type, int id) {
@@ -80,6 +92,10 @@ public abstract class JdbcLob extends TraceObject {
         this.state = state;
     }
 
+    /**
+     * Check that connection and LOB is not closed, otherwise throws exception with
+     * error code {@link org.h2.api.ErrorCode#OBJECT_CLOSED}.
+     */
     void checkClosed() {
         conn.checkClosed();
         if (state == State.CLOSED) {
@@ -87,6 +103,10 @@ public abstract class JdbcLob extends TraceObject {
         }
     }
 
+    /**
+     * Check the state of the LOB and throws the exception when check failed
+     * (set is supported only for a new LOB).
+     */
     void checkEditable() {
         checkClosed();
         if (state != State.NEW) {
@@ -94,6 +114,13 @@ public abstract class JdbcLob extends TraceObject {
         }
     }
 
+    /**
+     * Check the state of the LOB and throws the exception when check failed
+     * (the LOB must be set completely before read).
+     *
+     * @throws SQLException on SQL exception
+     * @throws IOException on I/O exception
+     */
     void checkReadable() throws SQLException, IOException {
         checkClosed();
         if (state == State.SET_CALLED) {
@@ -101,6 +128,10 @@ public abstract class JdbcLob extends TraceObject {
         }
     }
 
+    /**
+     * Change the state LOB state (LOB value is set completely and available to read).
+     * @param blob LOB value.
+     */
     void completeWrite(Value blob) {
         checkClosed();
         state = State.WITH_VALUE;
@@ -146,10 +177,22 @@ public abstract class JdbcLob extends TraceObject {
         }
     }
 
+    /**
+     * Returns the writer.
+     *
+     * @return Writer.
+     * @throws IOException If an I/O error occurs.
+     */
     Writer setCharacterStreamImpl() throws IOException {
         return IOUtils.getBufferedWriter(setClobOutputStreamImpl());
     }
 
+    /**
+     * Returns the writer stream.
+     *
+     * @return Output stream..
+     * @throws IOException If an I/O error occurs.
+     */
     LobPipedOutputStream setClobOutputStreamImpl() throws IOException {
         // PipedReader / PipedWriter are a lot slower
         // than PipedInputStream / PipedOutputStream

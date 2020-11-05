@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.jdbc;
@@ -25,7 +25,7 @@ import org.h2.value.Value;
 /**
  * Represents a BLOB value.
  */
-public class JdbcBlob extends JdbcLob implements Blob {
+public final class JdbcBlob extends JdbcLob implements Blob {
 
     /**
      * INTERNAL
@@ -44,8 +44,8 @@ public class JdbcBlob extends JdbcLob implements Blob {
         try {
             debugCodeCall("length");
             checkReadable();
-            if (value.getType() == Value.BLOB) {
-                long precision = value.getPrecision();
+            if (value.getValueType() == Value.BLOB) {
+                long precision = value.getType().getPrecision();
                 if (precision > 0) {
                     return precision;
                 }
@@ -77,7 +77,7 @@ public class JdbcBlob extends JdbcLob implements Blob {
     public byte[] getBytes(long pos, int length) throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("getBytes("+pos+", "+length+");");
+                debugCode("getBytes(" + pos + ", " + length + ')');
             }
             checkReadable();
             ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -107,7 +107,7 @@ public class JdbcBlob extends JdbcLob implements Blob {
         }
         try {
             if (isDebugEnabled()) {
-                debugCode("setBytes("+pos+", "+quoteBytes(bytes)+");");
+                debugCode("setBytes(" + pos + ", " + quoteBytes(bytes) + ')');
             }
             checkEditable();
             if (pos != 1) {
@@ -137,14 +137,14 @@ public class JdbcBlob extends JdbcLob implements Blob {
         }
         try {
             if (isDebugEnabled()) {
-                debugCode("setBytes(" + pos + ", " + quoteBytes(bytes) + ", " + offset + ", " + len + ");");
+                debugCode("setBytes(" + pos + ", " + quoteBytes(bytes) + ", " + offset + ", " + len + ')');
             }
             checkEditable();
             if (pos != 1) {
                 throw DbException.getInvalidValueException("pos", pos);
             }
             completeWrite(conn.createBlob(new ByteArrayInputStream(bytes, offset, len), -1));
-            return (int) value.getPrecision();
+            return (int) value.getType().getPrecision();
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -169,7 +169,7 @@ public class JdbcBlob extends JdbcLob implements Blob {
     public OutputStream setBinaryStream(long pos) throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("setBinaryStream("+pos+");");
+                debugCodeCall("setBinaryStream", pos);
             }
             checkEditable();
             if (pos != 1) {
@@ -201,7 +201,7 @@ public class JdbcBlob extends JdbcLob implements Blob {
     @Override
     public long position(byte[] pattern, long start) throws SQLException {
         if (isDebugEnabled()) {
-            debugCode("position("+quoteBytes(pattern)+", "+start+");");
+            debugCode("position(" + quoteBytes(pattern) + ", " + start + ')');
         }
         if (Constants.BLOB_SEARCH) {
             try {
@@ -256,7 +256,7 @@ public class JdbcBlob extends JdbcLob implements Blob {
     @Override
     public long position(Blob blobPattern, long start) throws SQLException {
         if (isDebugEnabled()) {
-            debugCode("position(blobPattern, "+start+");");
+            debugCode("position(blobPattern, " + start + ')');
         }
         if (Constants.BLOB_SEARCH) {
             try {
@@ -292,7 +292,7 @@ public class JdbcBlob extends JdbcLob implements Blob {
     public InputStream getBinaryStream(long pos, long length) throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("getBinaryStream(" + pos + ", " + length + ");");
+                debugCode("getBinaryStream(" + pos + ", " + length + ')');
             }
             checkReadable();
             if (state == State.NEW) {

@@ -1,13 +1,13 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.constraint;
 
 import java.util.HashSet;
 import org.h2.api.ErrorCode;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
 import org.h2.expression.ExpressionVisitor;
 import org.h2.index.Index;
@@ -50,21 +50,24 @@ public class ConstraintCheck extends Constraint {
     @Override
     public String getCreateSQLForCopy(Table forTable, String quotedName) {
         StringBuilder buff = new StringBuilder("ALTER TABLE ");
-        buff.append(forTable.getSQL()).append(" ADD CONSTRAINT ");
+        forTable.getSQL(buff, DEFAULT_SQL_FLAGS).append(" ADD CONSTRAINT ");
         if (forTable.isHidden()) {
             buff.append("IF NOT EXISTS ");
         }
         buff.append(quotedName);
         if (comment != null) {
-            buff.append(" COMMENT ").append(StringUtils.quoteStringSQL(comment));
+            buff.append(" COMMENT ");
+            StringUtils.quoteStringSQL(buff, comment);
         }
-        buff.append(" CHECK").append(StringUtils.enclose(expr.getSQL()))
-                .append(" NOCHECK");
+        buff.append(" CHECK");
+        expr.getEnclosedSQL(buff, DEFAULT_SQL_FLAGS).append(" NOCHECK");
         return buff.toString();
     }
 
     private String getShortDescription() {
-        return getName() + ": " + expr.getSQL();
+        StringBuilder builder = new StringBuilder().append(getName()).append(": ");
+        expr.getTraceSQL();
+        return builder.toString();
     }
 
     @Override
@@ -74,11 +77,11 @@ public class ConstraintCheck extends Constraint {
 
     @Override
     public String getCreateSQL() {
-        return getCreateSQLForCopy(table, getSQL());
+        return getCreateSQLForCopy(table, getSQL(DEFAULT_SQL_FLAGS));
     }
 
     @Override
-    public void removeChildrenAndResources(Session session) {
+    public void removeChildrenAndResources(SessionLocal session) {
         table.removeConstraint(this);
         database.removeMeta(session, getId());
         filter = null;
@@ -88,14 +91,17 @@ public class ConstraintCheck extends Constraint {
     }
 
     @Override
-    public void checkRow(Session session, Table t, Row oldRow, Row newRow) {
+    public void checkRow(SessionLocal session, Table t, Row oldRow, Row newRow) {
         if (newRow == null) {
             return;
         }
-        filter.set(newRow);
         boolean b;
         try {
-            Value v = expr.getValue(session);
+            Value v;
+            synchronized (this) {
+                filter.set(newRow);
+                v = expr.getValue(session);
+            }
             // Both TRUE and NULL are ok
             b = v == ValueNull.INSTANCE || v.getBoolean();
         } catch (DbException ex) {
@@ -115,7 +121,7 @@ public class ConstraintCheck extends Constraint {
 
     @Override
     public void setIndexOwner(Index index) {
-        DbException.throwInternalError(toString());
+        throw DbException.getInternalError(toString());
     }
 
     @Override
@@ -125,6 +131,7 @@ public class ConstraintCheck extends Constraint {
         return columns;
     }
 
+    @Override
     public Expression getExpression() {
         return expr;
     }
@@ -135,22 +142,19 @@ public class ConstraintCheck extends Constraint {
     }
 
     @Override
-    public void checkExistingData(Session session) {
+    public void checkExistingData(SessionLocal session) {
         if (session.getDatabase().isStarting()) {
             // don't check at startup
             return;
         }
-        String sql = "SELECT 1 FROM " + filter.getTable().getSQL() +
-                " WHERE NOT(" + expr.getSQL() + ")";
+        StringBuilder builder = new StringBuilder().append("SELECT NULL FROM ");
+        filter.getTable().getSQL(builder, DEFAULT_SQL_FLAGS).append(" WHERE NOT ");
+        expr.getSQL(builder, DEFAULT_SQL_FLAGS, Expression.AUTO_PARENTHESES);
+        String sql = builder.toString();
         ResultInterface r = session.prepare(sql).query(1);
         if (r.next()) {
             throw DbException.get(ErrorCode.CHECK_CONSTRAINT_VIOLATED_1, getName());
         }
-    }
-
-    @Override
-    public Index getUniqueIndex() {
-        return null;
     }
 
     @Override

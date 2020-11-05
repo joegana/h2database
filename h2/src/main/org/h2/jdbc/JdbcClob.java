@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.jdbc;
@@ -25,7 +25,7 @@ import org.h2.value.Value;
 /**
  * Represents a CLOB value.
  */
-public class JdbcClob extends JdbcLob implements NClob {
+public final class JdbcClob extends JdbcLob implements NClob {
 
     /**
      * INTERNAL
@@ -44,8 +44,8 @@ public class JdbcClob extends JdbcLob implements NClob {
         try {
             debugCodeCall("length");
             checkReadable();
-            if (value.getType() == Value.CLOB) {
-                long precision = value.getPrecision();
+            if (value.getValueType() == Value.CLOB) {
+                long precision = value.getType().getPrecision();
                 if (precision > 0) {
                     return precision;
                 }
@@ -108,7 +108,7 @@ public class JdbcClob extends JdbcLob implements NClob {
     public Writer setCharacterStream(long pos) throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("setCharacterStream(" + pos + ");");
+                debugCodeCall("setCharacterStream", pos);
             }
             checkEditable();
             if (pos != 1) {
@@ -132,7 +132,7 @@ public class JdbcClob extends JdbcLob implements NClob {
     public String getSubString(long pos, int length) throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("getSubString(" + pos + ", " + length + ");");
+                debugCode("getSubString(" + pos + ", " + length + ')');
             }
             checkReadable();
             if (pos < 1) {
@@ -166,7 +166,7 @@ public class JdbcClob extends JdbcLob implements NClob {
     public int setString(long pos, String str) throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("setString(" + pos + ", " + quote(str) + ");");
+                debugCode("setString(" + pos + ", " + quote(str) + ')');
             }
             checkEditable();
             if (pos != 1) {
@@ -197,7 +197,7 @@ public class JdbcClob extends JdbcLob implements NClob {
             throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("setString(" + pos + ", " + quote(str) + ", " + offset + ", " + len + ");");
+                debugCode("setString(" + pos + ", " + quote(str) + ", " + offset + ", " + len + ')');
             }
             checkEditable();
             if (pos != 1) {
@@ -206,7 +206,7 @@ public class JdbcClob extends JdbcLob implements NClob {
                 throw DbException.getInvalidValueException("str", str);
             }
             completeWrite(conn.createClob(new RangeReader(new StringReader(str), offset, len), -1));
-            return (int) value.getPrecision();
+            return (int) value.getType().getPrecision();
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -239,7 +239,7 @@ public class JdbcClob extends JdbcLob implements NClob {
     public Reader getCharacterStream(long pos, long length) throws SQLException {
         try {
             if (isDebugEnabled()) {
-                debugCode("getCharacterStream(" + pos + ", " + length + ");");
+                debugCode("getCharacterStream(" + pos + ", " + length + ')');
             }
             checkReadable();
             if (state == State.NEW) {

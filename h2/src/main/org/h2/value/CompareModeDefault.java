@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
@@ -20,12 +20,13 @@ public class CompareModeDefault extends CompareMode {
     private final Collator collator;
     private final SmallLRUCache<String, CollationKey> collationKeys;
 
-    protected CompareModeDefault(String name, int strength,
-            boolean binaryUnsigned) {
-        super(name, strength, binaryUnsigned);
+    private volatile CompareModeDefault caseInsensitive;
+
+    protected CompareModeDefault(String name, int strength) {
+        super(name, strength);
         collator = CompareMode.getCollator(name);
         if (collator == null) {
-            throw DbException.throwInternalError(name);
+            throw DbException.getInternalError(name);
         }
         collator.setStrength(strength);
         int cacheSize = SysProperties.COLLATOR_CACHE_SIZE;
@@ -38,10 +39,12 @@ public class CompareModeDefault extends CompareMode {
 
     @Override
     public int compareString(String a, String b, boolean ignoreCase) {
-        if (ignoreCase) {
-            // this is locale sensitive
-            a = a.toUpperCase();
-            b = b.toUpperCase();
+        if (ignoreCase && getStrength() > Collator.SECONDARY) {
+            CompareModeDefault i = caseInsensitive;
+            if (i == null) {
+                caseInsensitive = i = new CompareModeDefault(getName(), Collator.SECONDARY);
+            }
+            return i.compareString(a, b, false);
         }
         int comp;
         if (collationKeys != null) {

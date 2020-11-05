@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
@@ -13,21 +13,21 @@ import org.h2.util.StringUtils;
 /**
  * Represents a database object comment.
  */
-public class Comment extends DbObjectBase {
+public final class Comment extends DbObject {
 
     private final int objectType;
-    private final String objectName;
+    private final String quotedObjectName;
     private String commentText;
 
     public Comment(Database database, int id, DbObject obj) {
         super(database, id,  getKey(obj), Trace.DATABASE);
         this.objectType = obj.getType();
-        this.objectName = obj.getSQL();
+        this.quotedObjectName = obj.getSQL(DEFAULT_SQL_FLAGS);
     }
 
     @Override
     public String getCreateSQLForCopy(Table table, String quotedName) {
-        throw DbException.throwInternalError(toString());
+        throw DbException.getInternalError(toString());
     }
 
     private static String getTypeName(int type) {
@@ -52,7 +52,7 @@ public class Comment extends DbObjectBase {
             return "TRIGGER";
         case DbObject.USER:
             return "USER";
-        case DbObject.USER_DATATYPE:
+        case DbObject.DOMAIN:
             return "DOMAIN";
         default:
             // not supported by parser, but required when trying to find a
@@ -62,19 +62,14 @@ public class Comment extends DbObjectBase {
     }
 
     @Override
-    public String getDropSQL() {
-        return null;
-    }
-
-    @Override
     public String getCreateSQL() {
         StringBuilder buff = new StringBuilder("COMMENT ON ");
         buff.append(getTypeName(objectType)).append(' ').
-                append(objectName).append(" IS ");
+                append(quotedObjectName).append(" IS ");
         if (commentText == null) {
             buff.append("NULL");
         } else {
-            buff.append(StringUtils.quoteStringSQL(commentText));
+            StringUtils.quoteStringSQL(buff, commentText);
         }
         return buff.toString();
     }
@@ -85,13 +80,13 @@ public class Comment extends DbObjectBase {
     }
 
     @Override
-    public void removeChildrenAndResources(Session session) {
+    public void removeChildrenAndResources(SessionLocal session) {
         database.removeMeta(session, getId());
     }
 
     @Override
     public void checkRename() {
-        DbException.throwInternalError();
+        throw DbException.getInternalError();
     }
 
     /**
@@ -102,7 +97,9 @@ public class Comment extends DbObjectBase {
      * @return the key name
      */
     static String getKey(DbObject obj) {
-        return getTypeName(obj.getType()) + " " + obj.getSQL();
+        StringBuilder builder = new StringBuilder(getTypeName(obj.getType())).append(' ');
+        obj.getSQL(builder, DEFAULT_SQL_FLAGS);
+        return builder.toString();
     }
 
     /**

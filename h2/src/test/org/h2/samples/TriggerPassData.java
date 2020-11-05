@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.samples;
@@ -35,9 +35,9 @@ public class TriggerPassData implements Trigger {
                 "jdbc:h2:mem:test", "sa", "");
         Statement stat = conn.createStatement();
         stat.execute("CREATE TABLE TEST(ID INT)");
-        stat.execute("CREATE ALIAS TRIGGER_SET FOR \"" +
+        stat.execute("CREATE ALIAS TRIGGER_SET FOR '" +
                 TriggerPassData.class.getName() +
-                ".setTriggerData\"");
+                ".setTriggerData'");
         stat.execute("CREATE TRIGGER T1 " +
                 "BEFORE INSERT ON TEST " +
                 "FOR EACH ROW CALL \"" +
@@ -62,16 +62,6 @@ public class TriggerPassData implements Trigger {
         System.out.println(triggerData + ": " + row[0]);
     }
 
-    @Override
-    public void close() {
-        // ignore
-    }
-
-    @Override
-    public void remove() {
-        // ignore
-    }
-
     /**
      * Call this method to change a specific trigger.
      *
@@ -87,7 +77,7 @@ public class TriggerPassData implements Trigger {
     private static String getPrefix(Connection conn) throws SQLException {
         Statement stat = conn.createStatement();
         ResultSet rs = stat.executeQuery(
-                "call ifnull(database_path() || '_', '') || database() || '_'");
+                "call coalesce(database_path() || '_', '') || database() || '_'");
         rs.next();
         return rs.getString(1);
     }

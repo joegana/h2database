@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.mvstore.db;
@@ -16,8 +16,10 @@ import org.h2.mvstore.MVMap;
 import org.h2.mvstore.MVMap.Builder;
 import org.h2.result.ResultExternal;
 import org.h2.result.SortOrder;
+import org.h2.result.RowFactory.DefaultRowFactory;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
-import org.h2.value.ValueArray;
+import org.h2.value.ValueRow;
 
 /**
  * Sorted temporary result.
@@ -48,7 +50,7 @@ class MVSortedTempResult extends MVTempResult {
      * Map with rows as keys and counts of duplicate rows as values. If this map is
      * distinct all values are 1.
      */
-    private final MVMap<ValueArray, Long> map;
+    private final MVMap<ValueRow, Long> map;
 
     /**
      * Optional index. This index is created only if result is distinct and
@@ -56,12 +58,17 @@ class MVSortedTempResult extends MVTempResult {
      * {@link #contains(Value[])} method is invoked. Only the root result should
      * have an index if required.
      */
-    private MVMap<ValueArray, Boolean> index;
+    private MVMap<ValueRow, ValueRow> index;
+
+    /**
+     * Used for DISTINCT ON in presence of ORDER BY.
+     */
+    private ValueDataType orderedDistinctOnType;
 
     /**
      * Cursor for the {@link #next()} method.
      */
-    private Cursor<ValueArray, Long> cursor;
+    private Cursor<ValueRow, Long> cursor;
 
     /**
      * Current value for the {@link #next()} method. Used in non-distinct results
@@ -103,24 +110,26 @@ class MVSortedTempResult extends MVTempResult {
      *            indexes of distinct columns for DISTINCT ON results
      * @param visibleColumnCount
      *            count of visible columns
+     * @param resultColumnCount
+     *            the number of columns including visible columns and additional
+     *            virtual columns for ORDER BY and DISTINCT ON clauses
      * @param sort
      *            sort order, or {@code null} if this result does not need any
      *            sorting
      */
     MVSortedTempResult(Database database, Expression[] expressions, boolean distinct, int[] distinctIndexes,
-            int visibleColumnCount, SortOrder sort) {
-        super(database, expressions.length, visibleColumnCount);
+            int visibleColumnCount, int resultColumnCount, SortOrder sort) {
+        super(database, expressions, visibleColumnCount, resultColumnCount);
         this.distinct = distinct;
         this.distinctIndexes = distinctIndexes;
-        int length = columnCount;
-        int[] sortTypes = new int[length];
+        int[] sortTypes = new int[resultColumnCount];
         int[] indexes;
         if (sort != null) {
             /*
              * If sorting is specified we need to reorder columns in requested order and set
              * sort types (ASC, DESC etc) for them properly.
              */
-            indexes = new int[length];
+            indexes = new int[resultColumnCount];
             int[] colIndex = sort.getQueryColumnIndexes();
             int len = colIndex.length;
             // This set is used to remember columns that are already included
@@ -138,7 +147,7 @@ class MVSortedTempResult extends MVTempResult {
              * order (ASC / 0) will be used for them.
              */
             int idx = 0;
-            for (int i = len; i < length; i++) {
+            for (int i = len; i < resultColumnCount; i++) {
                 idx = used.nextClearBit(idx);
                 indexes[i] = idx;
                 idx++;
@@ -149,7 +158,7 @@ class MVSortedTempResult extends MVTempResult {
              * reordered or have the same order.
              */
             sameOrder: {
-                for (int i = 0; i < length; i++) {
+                for (int i = 0; i < resultColumnCount; i++) {
                     if (indexes[i] != i) {
                         // Columns are reordered
                         break sameOrder;
@@ -166,13 +175,45 @@ class MVSortedTempResult extends MVTempResult {
             indexes = null;
         }
         this.indexes = indexes;
-        ValueDataType keyType = new ValueDataType(database, sortTypes);
-        Builder<ValueArray, Long> builder = new MVMap.Builder<ValueArray, Long>().keyType(keyType);
+        ValueDataType keyType = new ValueDataType(database, SortOrder.addNullOrdering(database, sortTypes));
+        if (indexes != null) {
+            int l = indexes.length;
+            TypeInfo[] types = new TypeInfo[l];
+            for (int i = 0; i < l; i++) {
+                types[i] = expressions[indexes[i]].getType();
+            }
+            keyType.setRowFactory(DefaultRowFactory.INSTANCE.createRowFactory(database, database.getCompareMode(),
+                    database.getMode(), database, types, null));
+        } else {
+            keyType.setRowFactory(DefaultRowFactory.INSTANCE.createRowFactory(database, database.getCompareMode(),
+                    database.getMode(), database, expressions, null));
+        }
+        Builder<ValueRow, Long> builder = new MVMap.Builder<ValueRow, Long>().keyType(keyType);
         map = store.openMap("tmp", builder);
-        if (distinct && length != visibleColumnCount || distinctIndexes != null) {
-            int count = distinctIndexes != null ? distinctIndexes.length : visibleColumnCount;
+        if (distinct && resultColumnCount != visibleColumnCount || distinctIndexes != null) {
+            int count;
+            TypeInfo[] types;
+            if (distinctIndexes != null) {
+                count = distinctIndexes.length;
+                types = new TypeInfo[count];
+                for (int i = 0; i < count; i++) {
+                    types[i] = expressions[distinctIndexes[i]].getType();
+                }
+            } else {
+                count = visibleColumnCount;
+                types = new TypeInfo[count];
+                for (int i = 0; i < count; i++) {
+                    types[i] = expressions[i].getType();
+                }
+            }
             ValueDataType distinctType = new ValueDataType(database, new int[count]);
-            Builder<ValueArray, Boolean> indexBuilder = new MVMap.Builder<ValueArray, Boolean>().keyType(distinctType);
+            distinctType.setRowFactory(DefaultRowFactory.INSTANCE.createRowFactory(database, database.getCompareMode(),
+                    database.getMode(), database, types, null));
+            Builder<ValueRow, ValueRow> indexBuilder = new MVMap.Builder<ValueRow, ValueRow>().keyType(distinctType);
+            if (distinctIndexes != null && sort != null) {
+                indexBuilder.valueType(keyType);
+                orderedDistinctOnType = keyType;
+            }
             index = store.openMap("idx", indexBuilder);
         }
     }
@@ -180,7 +221,7 @@ class MVSortedTempResult extends MVTempResult {
     @Override
     public int addRow(Value[] values) {
         assert parent == null;
-        ValueArray key = getKey(values);
+        ValueRow key = getKey(values);
         if (distinct || distinctIndexes != null) {
             if (distinctIndexes != null) {
                 int cnt = distinctIndexes.length;
@@ -188,13 +229,26 @@ class MVSortedTempResult extends MVTempResult {
                 for (int i = 0; i < cnt; i++) {
                     newValues[i] = values[distinctIndexes[i]];
                 }
-                ValueArray distinctRow = ValueArray.get(newValues);
-                if (index.putIfAbsent(distinctRow, true) != null) {
-                    return rowCount;
+                ValueRow distinctRow = ValueRow.get(newValues);
+                if (orderedDistinctOnType == null) {
+                    if (index.putIfAbsent(distinctRow, ValueRow.EMPTY) != null) {
+                        return rowCount;
+                    }
+                } else {
+                    ValueRow previous = index.get(distinctRow);
+                    if (previous == null) {
+                        index.put(distinctRow, key);
+                    } else if (orderedDistinctOnType.compare(previous, key) > 0) {
+                        map.remove(previous);
+                        rowCount--;
+                        index.put(distinctRow, key);
+                    } else {
+                        return rowCount;
+                    }
                 }
-            } else if (columnCount != visibleColumnCount) {
-                ValueArray distinctRow = ValueArray.get(Arrays.copyOf(values, visibleColumnCount));
-                if (index.putIfAbsent(distinctRow, true) != null) {
+            } else if (visibleColumnCount != resultColumnCount) {
+                ValueRow distinctRow = ValueRow.get(Arrays.copyOf(values, visibleColumnCount));
+                if (index.putIfAbsent(distinctRow, ValueRow.EMPTY) != null) {
                     return rowCount;
                 }
             }
@@ -221,8 +275,8 @@ class MVSortedTempResult extends MVTempResult {
             return parent.contains(values);
         }
         assert distinct;
-        if (columnCount != visibleColumnCount) {
-            return index.containsKey(ValueArray.get(values));
+        if (visibleColumnCount != resultColumnCount) {
+            return index.containsKey(ValueRow.get(values));
         }
         return map.containsKey(getKey(values));
     }
@@ -240,13 +294,13 @@ class MVSortedTempResult extends MVTempResult {
     }
 
     /**
-     * Reorder values if required and convert them into {@link ValueArray}.
+     * Reorder values if required and convert them into {@link ValueRow}.
      *
      * @param values
      *                   values
-     * @return ValueArray for maps
+     * @return ValueRow for maps
      */
-    private ValueArray getKey(Value[] values) {
+    private ValueRow getKey(Value[] values) {
         if (indexes != null) {
             Value[] r = new Value[indexes.length];
             for (int i = 0; i < indexes.length; i++) {
@@ -254,7 +308,7 @@ class MVSortedTempResult extends MVTempResult {
             }
             values = r;
         }
-        return ValueArray.get(values);
+        return ValueRow.get(values);
     }
 
     /**
@@ -308,7 +362,7 @@ class MVSortedTempResult extends MVTempResult {
     @Override
     public int removeRow(Value[] values) {
         assert parent == null && distinct;
-        if (columnCount != visibleColumnCount) {
+        if (visibleColumnCount != resultColumnCount) {
             throw DbException.getUnsupportedException("removeRow()");
         }
         // If an entry was removed decrement the counter

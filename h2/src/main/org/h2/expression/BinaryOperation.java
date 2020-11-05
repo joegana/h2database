@@ -1,35 +1,27 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression;
 
-import org.h2.engine.Mode;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.IntervalOperation.IntervalOpType;
+import org.h2.expression.function.DateTimeFunction;
 import org.h2.message.DbException;
-import org.h2.table.ColumnResolver;
-import org.h2.table.TableFilter;
-import org.h2.util.MathUtils;
 import org.h2.value.DataType;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
-import org.h2.value.ValueInt;
+import org.h2.value.ValueInteger;
 import org.h2.value.ValueNull;
-import org.h2.value.ValueString;
+import org.h2.value.ValueNumeric;
 
 /**
  * A mathematical expression, or string concatenation.
  */
-public class BinaryOperation extends Expression {
+public class BinaryOperation extends Operation2 {
 
     public enum OpType {
-        /**
-         * This operation represents a string concatenation as in
-         * 'Hello' || 'World'.
-         */
-        CONCAT,
-
         /**
          * This operation represents an addition as in 1 + 2.
          */
@@ -48,36 +40,45 @@ public class BinaryOperation extends Expression {
         /**
          * This operation represents a division as in 4 * 2.
          */
-        DIVIDE,
-
-        /**
-         * This operation represents a modulus as in 5 % 2.
-         */
-        MODULUS
+        DIVIDE
     }
 
     private OpType opType;
-    private Expression left, right;
-    private int dataType;
+    private TypeInfo forcedType;
     private boolean convertRight = true;
 
     public BinaryOperation(OpType opType, Expression left, Expression right) {
+        super(left, right);
         this.opType = opType;
-        this.left = left;
-        this.right = right;
+    }
+
+    /**
+     * Sets a forced data type of a datetime minus datetime operation.
+     *
+     * @param forcedType the forced data type
+     */
+    public void setForcedType(TypeInfo forcedType) {
+        if (opType != OpType.MINUS) {
+            throw getUnexpectedForcedTypeException();
+        }
+        this.forcedType = forcedType;
     }
 
     @Override
-    public String getSQL() {
+    public boolean needParentheses() {
+        return true;
+    }
+
+    @Override
+    public StringBuilder getUnenclosedSQL(StringBuilder builder, int sqlFlags) {
         // don't remove the space, otherwise it might end up some thing like
         // --1 which is a line remark
-        return '(' + left.getSQL() + ' ' + getOperationToken() + ' ' + right.getSQL() + ')';
+        left.getSQL(builder, sqlFlags, AUTO_PARENTHESES).append(' ').append(getOperationToken()).append(' ');
+        return right.getSQL(builder, sqlFlags, AUTO_PARENTHESES);
     }
 
     private String getOperationToken() {
         switch (opType) {
-        case CONCAT:
-            return "||";
         case PLUS:
             return "+";
         case MINUS:
@@ -86,39 +87,19 @@ public class BinaryOperation extends Expression {
             return "*";
         case DIVIDE:
             return "/";
-        case MODULUS:
-            return "%";
         default:
-            throw DbException.throwInternalError("opType=" + opType);
+            throw DbException.getInternalError("opType=" + opType);
         }
     }
 
     @Override
-    public Value getValue(Session session) {
-        Mode mode = session.getDatabase().getMode();
-        Value l = left.getValue(session).convertTo(dataType, mode);
+    public Value getValue(SessionLocal session) {
+        Value l = left.getValue(session).convertTo(type, session);
         Value r = right.getValue(session);
         if (convertRight) {
-            r = r.convertTo(dataType, mode);
+            r = r.convertTo(type, session);
         }
         switch (opType) {
-        case CONCAT: {
-            if (l == ValueNull.INSTANCE) {
-                if (mode.nullConcatIsNull) {
-                    return ValueNull.INSTANCE;
-                }
-                return r;
-            } else if (r == ValueNull.INSTANCE) {
-                if (mode.nullConcatIsNull) {
-                    return ValueNull.INSTANCE;
-                }
-                return l;
-            }
-            String s1 = l.getString(), s2 = r.getString();
-            StringBuilder buff = new StringBuilder(s1.length() + s2.length());
-            buff.append(s1).append(s2);
-            return ValueString.get(buff.toString());
-        }
         case PLUS:
             if (l == ValueNull.INSTANCE || r == ValueNull.INSTANCE) {
                 return ValueNull.INSTANCE;
@@ -138,65 +119,49 @@ public class BinaryOperation extends Expression {
             if (l == ValueNull.INSTANCE || r == ValueNull.INSTANCE) {
                 return ValueNull.INSTANCE;
             }
-            return l.divide(r);
-        case MODULUS:
-            if (l == ValueNull.INSTANCE || r == ValueNull.INSTANCE) {
-                return ValueNull.INSTANCE;
-            }
-            return l.modulus(r);
+            return l.divide(r, right.getType().getDecimalPrecision());
         default:
-            throw DbException.throwInternalError("type=" + opType);
+            throw DbException.getInternalError("type=" + opType);
         }
     }
 
     @Override
-    public void mapColumns(ColumnResolver resolver, int level, int state) {
-        left.mapColumns(resolver, level, state);
-        right.mapColumns(resolver, level, state);
-    }
-
-    @Override
-    public Expression optimize(Session session) {
+    public Expression optimize(SessionLocal session) {
         left = left.optimize(session);
         right = right.optimize(session);
-        switch (opType) {
-        case CONCAT:
-            dataType = Value.STRING;
-            break;
-        case PLUS:
-        case MINUS:
-        case MULTIPLY:
-        case DIVIDE:
-        case MODULUS:
-            int l = left.getType();
-            int r = right.getType();
-            if ((l == Value.NULL && r == Value.NULL) ||
-                    (l == Value.UNKNOWN && r == Value.UNKNOWN)) {
-                // (? + ?) - use decimal by default (the most safe data type) or
-                // string when text concatenation with + is enabled
-                if (opType == OpType.PLUS && session.getDatabase().
-                        getMode().allowPlusForStringConcat) {
-                    dataType = Value.STRING;
-                    opType = OpType.CONCAT;
-                } else {
-                    dataType = Value.DECIMAL;
-                }
-            } else if (DataType.isIntervalType(l) || DataType.isIntervalType(r)) {
-                return optimizeInterval(session, l, r);
-            } else if (DataType.isDateTimeType(l) || DataType.isDateTimeType(r)) {
-                return optimizeDateTime(session, l, r);
+        TypeInfo leftType = left.getType(), rightType = right.getType();
+        int l = leftType.getValueType(), r = rightType.getValueType();
+        if ((l == Value.NULL && r == Value.NULL) || (l == Value.UNKNOWN && r == Value.UNKNOWN)) {
+            // (? + ?) - use decimal by default (the most safe data type) or
+            // string when text concatenation with + is enabled
+            if (opType == OpType.PLUS && session.getDatabase().getMode().allowPlusForStringConcat) {
+                return new ConcatenationOperation(left, right).optimize(session);
             } else {
-                dataType = Value.getHigherOrder(l, r);
-                if (dataType == Value.ENUM) {
-                    dataType = Value.INT;
-                } else if (DataType.isStringType(dataType) &&
-                        session.getDatabase().getMode().allowPlusForStringConcat) {
-                    opType = OpType.CONCAT;
-                }
+                type = TypeInfo.TYPE_NUMERIC_FLOATING_POINT;
             }
-            break;
-        default:
-            DbException.throwInternalError("type=" + opType);
+        } else if (DataType.isIntervalType(l) || DataType.isIntervalType(r)) {
+            if (forcedType != null) {
+                throw getUnexpectedForcedTypeException();
+            }
+            return optimizeInterval(session, l, r);
+        } else if (DataType.isDateTimeType(l) || DataType.isDateTimeType(r)) {
+            return optimizeDateTime(session, l, r);
+        } else if (forcedType != null) {
+            throw getUnexpectedForcedTypeException();
+        } else {
+            int dataType = Value.getHigherOrder(l, r);
+            if (dataType == Value.NUMERIC) {
+                optimizeNumeric(leftType, rightType);
+            } else if (dataType == Value.DECFLOAT) {
+                optimizeDecfloat(leftType, rightType);
+            } else if (dataType == Value.ENUM) {
+                type = TypeInfo.TYPE_INTEGER;
+            } else if (DataType.isCharacterStringType(dataType)
+                    && opType == OpType.PLUS && session.getDatabase().getMode().allowPlusForStringConcat) {
+                return new ConcatenationOperation(left, right).optimize(session);
+            } else {
+                type = TypeInfo.getTypeInfo(dataType);
+            }
         }
         if (left.isConstant() && right.isConstant()) {
             return ValueExpression.get(getValue(session));
@@ -204,7 +169,77 @@ public class BinaryOperation extends Expression {
         return this;
     }
 
-    private Expression optimizeInterval(Session session, int l, int r) {
+    private void optimizeNumeric(TypeInfo leftType, TypeInfo rightType) {
+        leftType = leftType.toNumericType();
+        rightType = rightType.toNumericType();
+        long leftPrecision = leftType.getPrecision(), rightPrecision = rightType.getPrecision();
+        int leftScale = leftType.getScale(), rightScale = rightType.getScale();
+        long precision;
+        int scale;
+        switch (opType) {
+        case PLUS:
+        case MINUS:
+            // Precision is implementation-defined.
+            // Scale must be max(leftScale, rightScale).
+            // Choose the largest scale and adjust the precision of other
+            // argument.
+            if (leftScale < rightScale) {
+                leftPrecision += rightScale - leftScale;
+                scale = rightScale;
+            } else {
+                rightPrecision += leftScale - rightScale;
+                scale = leftScale;
+            }
+            // Add one extra digit to the largest precision.
+            precision = Math.max(leftPrecision, rightPrecision) + 1;
+            break;
+        case MULTIPLY:
+            // Precision is implementation-defined.
+            // Scale must be leftScale + rightScale.
+            // Use sum of precisions.
+            precision = leftPrecision + rightPrecision;
+            scale = leftScale + rightScale;
+            break;
+        case DIVIDE:
+            // Precision and scale are implementation-defined.
+            scale = ValueNumeric.getQuotientScale(leftScale, rightPrecision, rightScale);
+            if (scale < 0) {
+                scale = 0;
+            }
+            // Divider can be effectively multiplied by no more than
+            // 10^rightScale, so add rightScale to its precision and adjust the
+            // result to the changes in scale.
+            precision = leftPrecision + rightScale - leftScale + scale;
+            break;
+        default:
+            throw DbException.getInternalError("type=" + opType);
+        }
+        type = TypeInfo.getTypeInfo(Value.NUMERIC, precision, scale, null);
+    }
+
+    private void optimizeDecfloat(TypeInfo leftType, TypeInfo rightType) {
+        leftType = leftType.toDecfloatType();
+        rightType = rightType.toDecfloatType();
+        long leftPrecision = leftType.getPrecision(), rightPrecision = rightType.getPrecision();
+        long precision;
+        switch (opType) {
+        case PLUS:
+        case MINUS:
+        case DIVIDE:
+            // Add one extra digit to the largest precision.
+            precision = Math.max(leftPrecision, rightPrecision) + 1;
+            break;
+        case MULTIPLY:
+            // Use sum of precisions.
+            precision = leftPrecision + rightPrecision;
+            break;
+        default:
+            throw DbException.getInternalError("type=" + opType);
+        }
+        type = TypeInfo.getTypeInfo(Value.DECFLOAT, precision, 0, null);
+    }
+
+    private Expression optimizeInterval(SessionLocal session, int l, int r) {
         boolean lInterval = false, lNumeric = false, lDateTime = false;
         if (DataType.isIntervalType(l)) {
             lInterval = true;
@@ -263,8 +298,13 @@ public class BinaryOperation extends Expression {
             }
             break;
         case DIVIDE:
-            if (lInterval && rNumeric) {
-                return new IntervalOperation(IntervalOpType.INTERVAL_DIVIDE_NUMERIC, left, right);
+            if (lInterval) {
+                if (rNumeric) {
+                    return new IntervalOperation(IntervalOpType.INTERVAL_DIVIDE_NUMERIC, left, right);
+                } else if (rInterval && DataType.isYearMonthIntervalType(l) == DataType.isYearMonthIntervalType(r)) {
+                    // Non-standard
+                    return new IntervalOperation(IntervalOpType.INTERVAL_DIVIDE_INTERVAL, left, right);
+                }
             }
             break;
         default:
@@ -272,112 +312,97 @@ public class BinaryOperation extends Expression {
         throw getUnsupported(l, r);
     }
 
-    private Expression optimizeDateTime(Session session, int l, int r) {
+    private Expression optimizeDateTime(SessionLocal session, int l, int r) {
         switch (opType) {
-        case PLUS:
-            if (r != Value.getHigherOrder(l, r)) {
-                // order left and right: INT < TIME < DATE < TIMESTAMP
+        case PLUS: {
+            if (DataType.isDateTimeType(l)) {
+                if (DataType.isDateTimeType(r)) {
+                    if (l > r) {
+                        swap();
+                        int t = l;
+                        l = r;
+                        r = t;
+                    }
+                    return new CompatibilityDatePlusTimeOperation(right, left).optimize(session);
+                }
                 swap();
                 int t = l;
                 l = r;
                 r = t;
             }
             switch (l) {
-            case Value.INT: {
+            case Value.INTEGER:
                 // Oracle date add
-                Function f = Function.getFunction(session.getDatabase(), "DATEADD");
-                f.setParameter(0, ValueExpression.get(ValueString.get("DAY")));
-                f.setParameter(1, left);
-                f.setParameter(2, right);
-                f.doneWithParameters();
-                return f.optimize(session);
-            }
-            case Value.DECIMAL:
-            case Value.FLOAT:
-            case Value.DOUBLE: {
+                return new DateTimeFunction(DateTimeFunction.DATEADD, DateTimeFunction.DAY, left, right)
+                        .optimize(session);
+            case Value.NUMERIC:
+            case Value.REAL:
+            case Value.DOUBLE:
+            case Value.DECFLOAT:
                 // Oracle date add
-                Function f = Function.getFunction(session.getDatabase(), "DATEADD");
-                f.setParameter(0, ValueExpression.get(ValueString.get("SECOND")));
-                left = new BinaryOperation(OpType.MULTIPLY, ValueExpression.get(ValueInt
-                        .get(60 * 60 * 24)), left);
-                f.setParameter(1, left);
-                f.setParameter(2, right);
-                f.doneWithParameters();
-                return f.optimize(session);
-            }
-            case Value.TIME:
-                if (r == Value.TIME || r == Value.TIMESTAMP_TZ) {
-                    dataType = r;
-                    return this;
-                } else { // DATE, TIMESTAMP
-                    dataType = Value.TIMESTAMP;
-                    return this;
-                }
+                return new DateTimeFunction(DateTimeFunction.DATEADD, DateTimeFunction.SECOND,
+                        new BinaryOperation(OpType.MULTIPLY, ValueExpression.get(ValueInteger.get(60 * 60 * 24)),
+                                left), right).optimize(session);
             }
             break;
+        }
         case MINUS:
             switch (l) {
             case Value.DATE:
             case Value.TIMESTAMP:
             case Value.TIMESTAMP_TZ:
                 switch (r) {
-                case Value.INT: {
+                case Value.INTEGER: {
+                    if (forcedType != null) {
+                        throw getUnexpectedForcedTypeException();
+                    }
                     // Oracle date subtract
-                    Function f = Function.getFunction(session.getDatabase(), "DATEADD");
-                    f.setParameter(0, ValueExpression.get(ValueString.get("DAY")));
-                    right = new UnaryOperation(right);
-                    right = right.optimize(session);
-                    f.setParameter(1, right);
-                    f.setParameter(2, left);
-                    f.doneWithParameters();
-                    return f.optimize(session);
+                    return new DateTimeFunction(DateTimeFunction.DATEADD, DateTimeFunction.DAY,
+                            new UnaryOperation(right), left).optimize(session);
                 }
-                case Value.DECIMAL:
-                case Value.FLOAT:
-                case Value.DOUBLE: {
+                case Value.NUMERIC:
+                case Value.REAL:
+                case Value.DOUBLE:
+                case Value.DECFLOAT: {
+                    if (forcedType != null) {
+                        throw getUnexpectedForcedTypeException();
+                    }
                     // Oracle date subtract
-                    Function f = Function.getFunction(session.getDatabase(), "DATEADD");
-                    f.setParameter(0, ValueExpression.get(ValueString.get("SECOND")));
-                    right = new BinaryOperation(OpType.MULTIPLY, ValueExpression.get(ValueInt
-                            .get(60 * 60 * 24)), right);
-                    right = new UnaryOperation(right);
-                    right = right.optimize(session);
-                    f.setParameter(1, right);
-                    f.setParameter(2, left);
-                    f.doneWithParameters();
-                    return f.optimize(session);
+                    return new DateTimeFunction(DateTimeFunction.DATEADD, DateTimeFunction.SECOND,
+                            new BinaryOperation(OpType.MULTIPLY, ValueExpression.get(ValueInteger.get(-60 * 60 * 24)),
+                                    right), left).optimize(session);
                 }
                 case Value.TIME:
-                    dataType = Value.TIMESTAMP;
-                    return this;
+                case Value.TIME_TZ:
                 case Value.DATE:
                 case Value.TIMESTAMP:
                 case Value.TIMESTAMP_TZ:
-                    return new IntervalOperation(IntervalOpType.DATETIME_MINUS_DATETIME, left, right);
+                    return new IntervalOperation(IntervalOpType.DATETIME_MINUS_DATETIME, left, right, forcedType);
                 }
                 break;
             case Value.TIME:
-                if (r == Value.TIME) {
-                    return new IntervalOperation(IntervalOpType.DATETIME_MINUS_DATETIME, left, right);
+            case Value.TIME_TZ:
+                if (DataType.isDateTimeType(r)) {
+                    return new IntervalOperation(IntervalOpType.DATETIME_MINUS_DATETIME, left, right, forcedType);
                 }
                 break;
             }
             break;
         case MULTIPLY:
             if (l == Value.TIME) {
-                dataType = Value.TIME;
+                type = TypeInfo.TYPE_TIME;
                 convertRight = false;
                 return this;
             } else if (r == Value.TIME) {
                 swap();
-                dataType = Value.TIME;
+                type = TypeInfo.TYPE_TIME;
                 convertRight = false;
                 return this;
             }
             break;
         case DIVIDE:
             if (l == Value.TIME) {
-                dataType = Value.TIME;
+                type = TypeInfo.TYPE_TIME;
                 convertRight = false;
                 return this;
             }
@@ -389,7 +414,14 @@ public class BinaryOperation extends Expression {
 
     private DbException getUnsupported(int l, int r) {
         return DbException.getUnsupportedException(
-                DataType.getDataType(l).name + ' ' + getOperationToken() + ' ' + DataType.getDataType(r).name);
+                Value.getTypeName(l) + ' ' + getOperationToken() + ' ' + Value.getTypeName(r));
+    }
+
+    private DbException getUnexpectedForcedTypeException() {
+        StringBuilder builder = getUnenclosedSQL(new StringBuilder(), TRACE_SQL_FLAGS);
+        int index = builder.length();
+        return DbException.getSyntaxError(
+                IntervalOperation.getForcedTypeSQL(builder.append(' '), forcedType).toString(), index, "");
     }
 
     private void swap() {
@@ -398,74 +430,13 @@ public class BinaryOperation extends Expression {
         right = temp;
     }
 
-    @Override
-    public void setEvaluatable(TableFilter tableFilter, boolean b) {
-        left.setEvaluatable(tableFilter, b);
-        right.setEvaluatable(tableFilter, b);
-    }
-
-    @Override
-    public int getType() {
-        return dataType;
-    }
-
-    @Override
-    public long getPrecision() {
-        switch (opType) {
-        case CONCAT:
-            return left.getPrecision() + right.getPrecision();
-        default:
-            return Math.max(left.getPrecision(), right.getPrecision());
-        }
-    }
-
-    @Override
-    public int getDisplaySize() {
-        switch (opType) {
-        case CONCAT:
-            return MathUtils.convertLongToInt((long) left.getDisplaySize() +
-                    (long) right.getDisplaySize());
-        default:
-            return Math.max(left.getDisplaySize(), right.getDisplaySize());
-        }
-    }
-
-    @Override
-    public int getScale() {
-        return Math.max(left.getScale(), right.getScale());
-    }
-
-    @Override
-    public void updateAggregate(Session session, int stage) {
-        left.updateAggregate(session, stage);
-        right.updateAggregate(session, stage);
-    }
-
-    @Override
-    public boolean isEverything(ExpressionVisitor visitor) {
-        return left.isEverything(visitor) && right.isEverything(visitor);
-    }
-
-    @Override
-    public int getCost() {
-        return left.getCost() + right.getCost() + 1;
-    }
-
-    @Override
-    public int getSubexpressionCount() {
-        return 2;
-    }
-
-    @Override
-    public Expression getSubexpression(int index) {
-        switch (index) {
-        case 0:
-            return left;
-        case 1:
-            return right;
-        default:
-            throw new IndexOutOfBoundsException();
-        }
+    /**
+     * Returns the type of this binary operation.
+     *
+     * @return the type of this binary operation
+     */
+    public OpType getOperationType() {
+        return opType;
     }
 
 }

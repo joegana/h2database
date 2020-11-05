@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
@@ -8,20 +8,14 @@ package org.h2.value;
 import java.io.InputStream;
 import java.io.Reader;
 import java.math.BigDecimal;
-import java.sql.Date;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
-import java.sql.Time;
-import java.sql.Timestamp;
-import java.sql.Types;
 
-import org.h2.engine.Mode;
+import org.h2.engine.CastDataProvider;
 import org.h2.message.DbException;
 
 /**
  * Implementation of NULL. NULL is not a regular data type.
  */
-public class ValueNull extends Value {
+public final class ValueNull extends Value {
 
     /**
      * The main NULL instance.
@@ -29,33 +23,38 @@ public class ValueNull extends Value {
     public static final ValueNull INSTANCE = new ValueNull();
 
     /**
-     * This special instance is used as a marker for deleted entries in a map.
-     * It should not be used anywhere else.
-     */
-    public static final ValueNull DELETED = new ValueNull();
-
-    /**
      * The precision of NULL.
      */
-    private static final int PRECISION = 1;
+    static final int PRECISION = 1;
 
     /**
      * The display size of the textual representation of NULL.
      */
-    private static final int DISPLAY_SIZE = 4;
+    static final int DISPLAY_SIZE = 4;
 
     private ValueNull() {
         // don't allow construction
     }
 
     @Override
-    public String getSQL() {
-        return "NULL";
+    public StringBuilder getSQL(StringBuilder builder, int sqlFlags) {
+        return builder.append("NULL");
     }
 
     @Override
-    public int getType() {
-        return Value.NULL;
+    public TypeInfo getType() {
+        return TypeInfo.TYPE_NULL;
+    }
+
+    @Override
+    public int getValueType() {
+        return NULL;
+    }
+
+    @Override
+    public int getMemory() {
+        // Singleton value
+        return 0;
     }
 
     @Override
@@ -64,28 +63,33 @@ public class ValueNull extends Value {
     }
 
     @Override
-    public boolean getBoolean() {
-        return false;
-    }
-
-    @Override
-    public Date getDate() {
+    public Reader getReader() {
         return null;
     }
 
     @Override
-    public Time getTime() {
-        return null;
-    }
-
-    @Override
-    public Timestamp getTimestamp() {
+    public Reader getReader(long oneBasedOffset, long length) {
         return null;
     }
 
     @Override
     public byte[] getBytes() {
         return null;
+    }
+
+    @Override
+    public InputStream getInputStream() {
+        return null;
+    }
+
+    @Override
+    public InputStream getInputStream(long oneBasedOffset, long length) {
+        return null;
+    }
+
+    @Override
+    public boolean getBoolean() {
+        return false;
     }
 
     @Override
@@ -99,21 +103,6 @@ public class ValueNull extends Value {
     }
 
     @Override
-    public BigDecimal getBigDecimal() {
-        return null;
-    }
-
-    @Override
-    public double getDouble() {
-        return 0.0;
-    }
-
-    @Override
-    public float getFloat() {
-        return 0.0F;
-    }
-
-    @Override
     public int getInt() {
         return 0;
     }
@@ -124,49 +113,33 @@ public class ValueNull extends Value {
     }
 
     @Override
-    public InputStream getInputStream() {
+    public BigDecimal getBigDecimal() {
         return null;
     }
 
     @Override
-    public Reader getReader() {
-        return null;
+    public float getFloat() {
+        return 0.0F;
     }
 
     @Override
-    public Value convertTo(int type, int precision, Mode mode, Object column, ExtTypeInfo extTypeInfo) {
-        return this;
+    public double getDouble() {
+        return 0.0;
     }
 
     @Override
-    public int compareTypeSafe(Value v, CompareMode mode) {
-        throw DbException.throwInternalError("compare null");
+    public int compareTypeSafe(Value v, CompareMode mode, CastDataProvider provider) {
+        throw DbException.getInternalError("compare null");
     }
 
     @Override
-    public long getPrecision() {
-        return PRECISION;
+    public boolean containsNull() {
+        return true;
     }
 
     @Override
     public int hashCode() {
         return 0;
-    }
-
-    @Override
-    public Object getObject() {
-        return null;
-    }
-
-    @Override
-    public void set(PreparedStatement prep, int parameterIndex)
-            throws SQLException {
-        prep.setNull(parameterIndex, Types.NULL);
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return DISPLAY_SIZE;
     }
 
     @Override

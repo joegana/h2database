@@ -1,26 +1,24 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
 
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
+import java.math.BigDecimal;
 
-import org.h2.engine.Mode;
+import org.h2.engine.CastDataProvider;
+import org.h2.util.StringUtils;
 
 /**
  * Base implementation of the ENUM data type.
  *
- * Currently, this class is used primarily for
- * client-server communication.
+ * This base implementation is only used in 2.0.* clients when they work with
+ * 1.4.* servers.
  */
 public class ValueEnumBase extends Value {
-    private static final int PRECISION = 10;
-    private static final int DISPLAY_SIZE = 11;
 
-    private final String label;
+    final String label;
     private final int ordinal;
 
     protected ValueEnumBase(final String label, final int ordinal) {
@@ -29,20 +27,20 @@ public class ValueEnumBase extends Value {
     }
 
     @Override
-    public Value add(final Value v) {
-        final Value iv = v.convertTo(Value.INT);
-        return convertTo(Value.INT).add(iv);
+    public Value add(Value v) {
+        ValueInteger iv = v.convertToInt(null);
+        return convertToInt(null).add(iv);
     }
 
     @Override
-    public int compareTypeSafe(Value v, CompareMode mode) {
+    public int compareTypeSafe(Value v, CompareMode mode, CastDataProvider provider) {
         return Integer.compare(getInt(), v.getInt());
     }
 
     @Override
-    public Value divide(final Value v) {
-        final Value iv = v.convertTo(Value.INT);
-        return convertTo(Value.INT).divide(iv);
+    public Value divide(Value v, long divisorPrecision) {
+        ValueInteger iv = v.convertToInt(null);
+        return convertToInt(null).divide(iv, divisorPrecision);
     }
 
     @Override
@@ -58,13 +56,8 @@ public class ValueEnumBase extends Value {
      * @param ordinal the ordinal
      * @return the value
      */
-    public static ValueEnumBase get(final String label, final int ordinal) {
+    public static ValueEnumBase get(String label, int ordinal) {
         return new ValueEnumBase(label, ordinal);
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return DISPLAY_SIZE;
     }
 
     @Override
@@ -78,13 +71,18 @@ public class ValueEnumBase extends Value {
     }
 
     @Override
-    public Object getObject() {
-        return label;
+    public BigDecimal getBigDecimal() {
+        return BigDecimal.valueOf(ordinal);
     }
 
     @Override
-    public long getPrecision() {
-        return PRECISION;
+    public float getFloat() {
+        return ordinal;
+    }
+
+    @Override
+    public double getDouble() {
+        return ordinal;
     }
 
     @Override
@@ -93,8 +91,8 @@ public class ValueEnumBase extends Value {
     }
 
     @Override
-    public String getSQL() {
-        return getString();
+    public StringBuilder getSQL(StringBuilder builder, int sqlFlags) {
+        return StringUtils.quoteStringSQL(builder, label);
     }
 
     @Override
@@ -103,8 +101,18 @@ public class ValueEnumBase extends Value {
     }
 
     @Override
-    public int getType() {
-        return Value.ENUM;
+    public TypeInfo getType() {
+        return TypeInfo.TYPE_ENUM_UNDEFINED;
+    }
+
+    @Override
+    public int getValueType() {
+        return ENUM;
+    }
+
+    @Override
+    public int getMemory() {
+        return 120;
     }
 
     @Override
@@ -116,36 +124,21 @@ public class ValueEnumBase extends Value {
     }
 
     @Override
-    public Value modulus(final Value v) {
-        final Value iv = v.convertTo(Value.INT);
-        return convertTo(Value.INT).modulus(iv);
+    public Value modulus(Value v) {
+        ValueInteger iv = v.convertToInt(null);
+        return convertToInt(null).modulus(iv);
     }
 
     @Override
-    public Value multiply(final Value v) {
-        final Value iv = v.convertTo(Value.INT);
-        return convertTo(Value.INT).multiply(iv);
-    }
-
-
-    @Override
-    public void set(final PreparedStatement prep, final int parameterIndex)
-            throws SQLException {
-            prep.setInt(parameterIndex, ordinal);
+    public Value multiply(Value v) {
+        ValueInteger iv = v.convertToInt(null);
+        return convertToInt(null).multiply(iv);
     }
 
     @Override
-    public Value subtract(final Value v) {
-        final Value iv = v.convertTo(Value.INT);
-        return convertTo(Value.INT).subtract(iv);
-    }
-
-    @Override
-    public Value convertTo(int targetType, int precision, Mode mode, Object column, ExtTypeInfo extTypeInfo) {
-        if (targetType == Value.ENUM) {
-            return extTypeInfo.cast(this);
-        }
-        return super.convertTo(targetType, precision, mode, column, extTypeInfo);
+    public Value subtract(Value v) {
+        ValueInteger iv = v.convertToInt(null);
+        return convertToInt(null).subtract(iv);
     }
 
 }

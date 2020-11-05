@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.result;
@@ -12,14 +12,18 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 
 import org.h2.api.ErrorCode;
+import org.h2.engine.Constants;
+import org.h2.engine.Session;
+import org.h2.engine.SessionRemote;
 import org.h2.jdbc.JdbcConnection;
+import org.h2.jdbc.JdbcResultSet;
 import org.h2.message.DbException;
-import org.h2.util.StatementBuilder;
+import org.h2.util.JdbcUtils;
 import org.h2.util.StringUtils;
 import org.h2.util.Utils;
-import org.h2.value.DataType;
 import org.h2.value.Value;
 import org.h2.value.ValueNull;
+import org.h2.value.ValueToObjectConverter;
 
 /**
  * This class is used for updatable result sets. An updatable row provides
@@ -47,6 +51,9 @@ public class UpdatableRow {
         this.conn = conn;
         this.result = result;
         columnCount = result.getVisibleColumnCount();
+        if (columnCount == 0) {
+            return;
+        }
         for (int i = 0; i < columnCount; i++) {
             String t = result.getTableName(i);
             String s = result.getSchemaName(i);
@@ -64,16 +71,18 @@ public class UpdatableRow {
                 return;
             }
         }
+        String type = "BASE TABLE";
+        Session session = conn.getSession();
+        if (session instanceof SessionRemote
+                && ((SessionRemote) session).getClientVersion() <= Constants.TCP_PROTOCOL_VERSION_19) {
+            type = "TABLE";
+        }
         final DatabaseMetaData meta = conn.getMetaData();
         ResultSet rs = meta.getTables(null,
                 StringUtils.escapeMetaDataPattern(schemaName),
                 StringUtils.escapeMetaDataPattern(tableName),
-                new String[] { "TABLE" });
+                new String[] { type });
         if (!rs.next()) {
-            return;
-        }
-        if (rs.getString("SQL") == null) {
-            // system table
             return;
         }
         String table = rs.getString("TABLE_NAME");
@@ -156,29 +165,30 @@ public class UpdatableRow {
         return index;
     }
 
-    private void appendColumnList(StatementBuilder buff, boolean set) {
-        buff.resetCount();
+    private void appendColumnList(StringBuilder builder, boolean set) {
         for (int i = 0; i < columnCount; i++) {
-            buff.appendExceptFirst(",");
+            if (i > 0) {
+                builder.append(',');
+            }
             String col = result.getColumnName(i);
-            buff.append(StringUtils.quoteIdentifier(col));
+            StringUtils.quoteIdentifier(builder, col);
             if (set) {
-                buff.append("=? ");
+                builder.append("=? ");
             }
         }
     }
 
-    private void appendKeyCondition(StatementBuilder buff) {
-        buff.append(" WHERE ");
-        buff.resetCount();
-        for (String k : key) {
-            buff.appendExceptFirst(" AND ");
-            buff.append(StringUtils.quoteIdentifier(k)).append("=?");
+    private void appendKeyCondition(StringBuilder builder) {
+        builder.append(" WHERE ");
+        for (int i = 0; i < key.size(); i++) {
+            if (i > 0) {
+                builder.append(" AND ");
+            }
+            StringUtils.quoteIdentifier(builder, key.get(i)).append("=?");
         }
     }
 
-    private void setKey(PreparedStatement prep, int start, Value[] current)
-            throws SQLException {
+    private void setKey(PreparedStatement prep, int start, Value[] current) throws SQLException {
         for (int i = 0, size = key.size(); i < size; i++) {
             String col = key.get(i);
             int idx = getColumnIndex(col);
@@ -188,7 +198,7 @@ public class UpdatableRow {
                 // as multiple such rows could exist
                 throw DbException.get(ErrorCode.NO_DATA_AVAILABLE);
             }
-            v.set(prep, start + i);
+            JdbcUtils.set(prep, start + i, v, conn);
         }
     }
 
@@ -204,11 +214,11 @@ public class UpdatableRow {
 //        return rs.getInt(1) == 0;
 //    }
 
-    private void appendTableName(StatementBuilder buff) {
+    private void appendTableName(StringBuilder builder) {
         if (schemaName != null && schemaName.length() > 0) {
-            buff.append(StringUtils.quoteIdentifier(schemaName)).append('.');
+            StringUtils.quoteIdentifier(builder, schemaName).append('.');
         }
-        buff.append(StringUtils.quoteIdentifier(tableName));
+        StringUtils.quoteIdentifier(builder, tableName);
     }
 
     /**
@@ -218,21 +228,20 @@ public class UpdatableRow {
      * @return the row
      */
     public Value[] readRow(Value[] row) throws SQLException {
-        StatementBuilder buff = new StatementBuilder("SELECT ");
-        appendColumnList(buff, false);
-        buff.append(" FROM ");
-        appendTableName(buff);
-        appendKeyCondition(buff);
-        PreparedStatement prep = conn.prepareStatement(buff.toString());
+        StringBuilder builder = new StringBuilder("SELECT ");
+        appendColumnList(builder, false);
+        builder.append(" FROM ");
+        appendTableName(builder);
+        appendKeyCondition(builder);
+        PreparedStatement prep = conn.prepareStatement(builder.toString());
         setKey(prep, 1, row);
-        ResultSet rs = prep.executeQuery();
+        JdbcResultSet rs = (JdbcResultSet) prep.executeQuery();
         if (!rs.next()) {
             throw DbException.get(ErrorCode.NO_DATA_AVAILABLE);
         }
         Value[] newRow = new Value[columnCount];
         for (int i = 0; i < columnCount; i++) {
-            int type = result.getColumnType(i);
-            newRow[i] = DataType.readValue(conn.getSession(), rs, i + 1, type);
+            newRow[i] = ValueToObjectConverter.readValue(conn.getSession(), rs, i + 1);
         }
         return newRow;
     }
@@ -244,10 +253,10 @@ public class UpdatableRow {
      * @throws SQLException if this row has already been deleted
      */
     public void deleteRow(Value[] current) throws SQLException {
-        StatementBuilder buff = new StatementBuilder("DELETE FROM ");
-        appendTableName(buff);
-        appendKeyCondition(buff);
-        PreparedStatement prep = conn.prepareStatement(buff.toString());
+        StringBuilder builder = new StringBuilder("DELETE FROM ");
+        appendTableName(builder);
+        appendKeyCondition(builder);
+        PreparedStatement prep = conn.prepareStatement(builder.toString());
         setKey(prep, 1, current);
         int count = prep.executeUpdate();
         if (count != 1) {
@@ -264,22 +273,22 @@ public class UpdatableRow {
      * @throws SQLException if the row has been deleted
      */
     public void updateRow(Value[] current, Value[] updateRow) throws SQLException {
-        StatementBuilder buff = new StatementBuilder("UPDATE ");
-        appendTableName(buff);
-        buff.append(" SET ");
-        appendColumnList(buff, true);
+        StringBuilder builder = new StringBuilder("UPDATE ");
+        appendTableName(builder);
+        builder.append(" SET ");
+        appendColumnList(builder, true);
         // TODO updatable result set: we could add all current values to the
         // where clause
         // - like this optimistic ('no') locking is possible
-        appendKeyCondition(buff);
-        PreparedStatement prep = conn.prepareStatement(buff.toString());
+        appendKeyCondition(builder);
+        PreparedStatement prep = conn.prepareStatement(builder.toString());
         int j = 1;
         for (int i = 0; i < columnCount; i++) {
             Value v = updateRow[i];
             if (v == null) {
                 v = current[i];
             }
-            v.set(prep, j++);
+            JdbcUtils.set(prep, j++, v, conn);
         }
         setKey(prep, j, current);
         int count = prep.executeUpdate();
@@ -296,27 +305,28 @@ public class UpdatableRow {
      * @throws SQLException if the row could not be inserted
      */
     public void insertRow(Value[] row) throws SQLException {
-        StatementBuilder buff = new StatementBuilder("INSERT INTO ");
-        appendTableName(buff);
-        buff.append('(');
-        appendColumnList(buff, false);
-        buff.append(")VALUES(");
-        buff.resetCount();
+        StringBuilder builder = new StringBuilder("INSERT INTO ");
+        appendTableName(builder);
+        builder.append('(');
+        appendColumnList(builder, false);
+        builder.append(")VALUES(");
         for (int i = 0; i < columnCount; i++) {
-            buff.appendExceptFirst(",");
+            if (i > 0) {
+                builder.append(',');
+            }
             Value v = row[i];
             if (v == null) {
-                buff.append("DEFAULT");
+                builder.append("DEFAULT");
             } else {
-                buff.append('?');
+                builder.append('?');
             }
         }
-        buff.append(')');
-        PreparedStatement prep = conn.prepareStatement(buff.toString());
+        builder.append(')');
+        PreparedStatement prep = conn.prepareStatement(builder.toString());
         for (int i = 0, j = 0; i < columnCount; i++) {
             Value v = row[i];
             if (v != null) {
-                v.set(prep, j++ + 1);
+                JdbcUtils.set(prep, j++ + 1, v, conn);
             }
         }
         int count = prep.executeUpdate();

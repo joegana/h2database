@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.dml;
@@ -8,7 +8,7 @@ package org.h2.command.dml;
 import org.h2.command.CommandInterface;
 import org.h2.command.Prepared;
 import org.h2.engine.Database;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.message.DbException;
 import org.h2.result.ResultInterface;
 
@@ -21,7 +21,7 @@ public class TransactionCommand extends Prepared {
     private String savepointName;
     private String transactionName;
 
-    public TransactionCommand(Session session, int type) {
+    public TransactionCommand(SessionLocal session, int type) {
         super(session);
         this.type = type;
     }
@@ -31,7 +31,7 @@ public class TransactionCommand extends Prepared {
     }
 
     @Override
-    public int update() {
+    public long update() {
         switch (type) {
         case CommandInterface.SET_AUTOCOMMIT_TRUE:
             session.setAutoCommit(true);
@@ -73,46 +73,27 @@ public class TransactionCommand extends Prepared {
             session.getUser().checkAdmin();
             session.setPreparedTransaction(transactionName, false);
             break;
-        case CommandInterface.SHUTDOWN_IMMEDIATELY:
-            session.getUser().checkAdmin();
-            session.getDatabase().shutdownImmediately();
-            break;
         case CommandInterface.SHUTDOWN:
         case CommandInterface.SHUTDOWN_COMPACT:
-        case CommandInterface.SHUTDOWN_DEFRAG: {
-            session.getUser().checkAdmin();
+        case CommandInterface.SHUTDOWN_DEFRAG:
             session.commit(false);
-            if (type == CommandInterface.SHUTDOWN_COMPACT ||
-                    type == CommandInterface.SHUTDOWN_DEFRAG) {
-                session.getDatabase().setCompactMode(type);
-            }
-            // close the database, but don't update the persistent setting
-            session.getDatabase().setCloseDelay(0);
-            Database db = session.getDatabase();
+            //$FALL-THROUGH$
+        case CommandInterface.SHUTDOWN_IMMEDIATELY: {
+            session.getUser().checkAdmin();
             // throttle, to allow testing concurrent
             // execution of shutdown and query
             session.throttle();
-            for (Session s : db.getSessions(false)) {
-                if (db.isMultiThreaded()) {
-                    synchronized (s) {
-                        s.rollback();
-                    }
-                } else {
-                    // if not multi-threaded, the session could already own
-                    // the lock, which would result in a deadlock
-                    // the other session can not concurrently do anything
-                    // because the current session has locked the database
-                    s.rollback();
-                }
-                if (s != session) {
-                    s.close();
-                }
+            Database db = session.getDatabase();
+            if (db.setExclusiveSession(session, true)) {
+                db.setCompactMode(type);
+                // close the database, but don't update the persistent setting
+                db.setCloseDelay(0);
+                session.close();
             }
-            session.close();
             break;
         }
         default:
-            DbException.throwInternalError("type=" + type);
+            throw DbException.getInternalError("type=" + type);
         }
         return 0;
     }

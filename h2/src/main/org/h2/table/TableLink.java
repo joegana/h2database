@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.table;
@@ -19,20 +19,21 @@ import java.util.Objects;
 
 import org.h2.api.ErrorCode;
 import org.h2.command.Prepared;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.engine.UndoLogRecord;
 import org.h2.index.Index;
 import org.h2.index.IndexType;
 import org.h2.index.LinkedIndex;
+import org.h2.jdbc.JdbcConnection;
 import org.h2.message.DbException;
 import org.h2.result.Row;
 import org.h2.result.RowList;
 import org.h2.schema.Schema;
-import org.h2.util.MathUtils;
-import org.h2.util.StatementBuilder;
+import org.h2.util.JdbcUtils;
 import org.h2.util.StringUtils;
 import org.h2.util.Utils;
 import org.h2.value.DataType;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 import org.h2.value.ValueDate;
 import org.h2.value.ValueTime;
@@ -121,63 +122,64 @@ public class TableLink extends Table {
         storesMixedCase = meta.storesMixedCaseIdentifiers();
         storesMixedCaseQuoted = meta.storesMixedCaseQuotedIdentifiers();
         supportsMixedCaseIdentifiers = meta.supportsMixedCaseIdentifiers();
-        ResultSet rs = meta.getTables(null, originalSchema, originalTable, null);
-        if (rs.next() && rs.next()) {
-            throw DbException.get(ErrorCode.SCHEMA_NAME_MUST_MATCH, originalTable);
-        }
-        rs.close();
-        rs = meta.getColumns(null, originalSchema, originalTable, null);
-        int i = 0;
         ArrayList<Column> columnList = Utils.newSmallArrayList();
         HashMap<String, Column> columnMap = new HashMap<>();
-        String catalog = null, schema = null;
-        while (rs.next()) {
-            String thisCatalog = rs.getString("TABLE_CAT");
-            if (catalog == null) {
-                catalog = thisCatalog;
+        String schema = null;
+        boolean isQuery = originalTable.startsWith("(");
+        if (!isQuery) {
+            try (ResultSet rs = meta.getTables(null, originalSchema, originalTable, null)) {
+                if (rs.next() && rs.next()) {
+                    throw DbException.get(ErrorCode.SCHEMA_NAME_MUST_MATCH, originalTable);
+                }
             }
-            String thisSchema = rs.getString("TABLE_SCHEM");
-            if (schema == null) {
-                schema = thisSchema;
+            try (ResultSet rs = meta.getColumns(null, originalSchema, originalTable, null)) {
+                int i = 0;
+                String catalog = null;
+                while (rs.next()) {
+                    String thisCatalog = rs.getString("TABLE_CAT");
+                    if (catalog == null) {
+                        catalog = thisCatalog;
+                    }
+                    String thisSchema = rs.getString("TABLE_SCHEM");
+                    if (schema == null) {
+                        schema = thisSchema;
+                    }
+                    if (!Objects.equals(catalog, thisCatalog) ||
+                            !Objects.equals(schema, thisSchema)) {
+                        // if the table exists in multiple schemas or tables,
+                        // use the alternative solution
+                        columnMap.clear();
+                        columnList.clear();
+                        break;
+                    }
+                    String n = rs.getString("COLUMN_NAME");
+                    n = convertColumnName(n);
+                    int sqlType = rs.getInt("DATA_TYPE");
+                    String sqlTypeName = rs.getString("TYPE_NAME");
+                    long precision = rs.getInt("COLUMN_SIZE");
+                    precision = convertPrecision(sqlType, precision);
+                    int scale = rs.getInt("DECIMAL_DIGITS");
+                    scale = convertScale(sqlType, scale);
+                    int type = DataType.convertSQLTypeToValueType(sqlType, sqlTypeName);
+                    Column col = new Column(n, TypeInfo.getTypeInfo(type, precision, scale, null), this, i++);
+                    columnList.add(col);
+                    columnMap.put(n, col);
+                }
             }
-            if (!Objects.equals(catalog, thisCatalog) ||
-                    !Objects.equals(schema, thisSchema)) {
-                // if the table exists in multiple schemas or tables,
-                // use the alternative solution
-                columnMap.clear();
-                columnList.clear();
-                break;
-            }
-            String n = rs.getString("COLUMN_NAME");
-            n = convertColumnName(n);
-            int sqlType = rs.getInt("DATA_TYPE");
-            String sqlTypeName = rs.getString("TYPE_NAME");
-            long precision = rs.getInt("COLUMN_SIZE");
-            precision = convertPrecision(sqlType, precision);
-            int scale = rs.getInt("DECIMAL_DIGITS");
-            scale = convertScale(sqlType, scale);
-            int displaySize = MathUtils.convertLongToInt(precision);
-            int type = DataType.convertSQLTypeToValueType(sqlType, sqlTypeName);
-            Column col = new Column(n, type, precision, scale, displaySize);
-            col.setTable(this, i++);
-            columnList.add(col);
-            columnMap.put(n, col);
         }
-        rs.close();
         if (originalTable.indexOf('.') < 0 && !StringUtils.isNullOrEmpty(schema)) {
-            qualifiedTableName = schema + "." + originalTable;
+            qualifiedTableName = schema + '.' + originalTable;
         } else {
             qualifiedTableName = originalTable;
         }
         // check if the table is accessible
 
-        try (Statement stat = conn.getConnection().createStatement()) {
-            rs = stat.executeQuery("SELECT * FROM " +
-                    qualifiedTableName + " T WHERE 1=0");
+        try (Statement stat = conn.getConnection().createStatement();
+                ResultSet rs = stat.executeQuery("SELECT * FROM " + qualifiedTableName + " T WHERE 1=0")) {
             if (columnList.isEmpty()) {
                 // alternative solution
                 ResultSetMetaData rsMeta = rs.getMetaData();
-                for (i = 0; i < rsMeta.getColumnCount();) {
+                for (int i = 0; i < rsMeta.getColumnCount();) {
                     String n = rsMeta.getColumnName(i + 1);
                     n = convertColumnName(n);
                     int sqlType = rsMeta.getColumnType(i + 1);
@@ -185,18 +187,15 @@ public class TableLink extends Table {
                     precision = convertPrecision(sqlType, precision);
                     int scale = rsMeta.getScale(i + 1);
                     scale = convertScale(sqlType, scale);
-                    int displaySize = rsMeta.getColumnDisplaySize(i + 1);
                     int type = DataType.getValueTypeFromResultSet(rsMeta, i + 1);
-                    Column col = new Column(n, type, precision, scale, displaySize);
-                    col.setTable(this, i++);
+                    Column col = new Column(n, TypeInfo.getTypeInfo(type, precision, scale, null), this, i++);
                     columnList.add(col);
                     columnMap.put(n, col);
                 }
             }
-            rs.close();
         } catch (Exception e) {
             throw DbException.get(ErrorCode.TABLE_OR_VIEW_NOT_FOUND_1, e,
-                    originalTable + "(" + e.toString() + ")");
+                    originalTable + '(' + e.toString() + ')');
         }
         Column[] cols = columnList.toArray(new Column[0]);
         setColumns(cols);
@@ -204,77 +203,84 @@ public class TableLink extends Table {
         linkedIndex = new LinkedIndex(this, id, IndexColumn.wrap(cols),
                 IndexType.createNonUnique(false));
         indexes.add(linkedIndex);
-        try {
-            rs = meta.getPrimaryKeys(null, originalSchema, originalTable);
+        if (!isQuery) {
+            readIndexes(meta, columnMap);
+        }
+    }
+
+    private void readIndexes(DatabaseMetaData meta, HashMap<String, Column> columnMap) {
+        String pkName = null;
+        try (ResultSet rs = meta.getPrimaryKeys(null, originalSchema, originalTable)) {
+            if (rs.next()) {
+                pkName = readPrimaryKey(rs, columnMap);
+            }
         } catch (Exception e) {
             // Some ODBC bridge drivers don't support it:
             // some combinations of "DataDirect SequeLink(R) for JDBC"
-            // http://www.datadirect.com/index.ssp
-            rs = null;
+            // https://www.progress.com/odbc/sequelink
         }
-        String pkName = "";
-        ArrayList<Column> list;
-        if (rs != null && rs.next()) {
-            // the problem is, the rows are not sorted by KEY_SEQ
-            list = Utils.newSmallArrayList();
-            do {
-                int idx = rs.getInt("KEY_SEQ");
-                if (pkName == null) {
-                    pkName = rs.getString("PK_NAME");
-                }
-                while (list.size() < idx) {
-                    list.add(null);
-                }
-                String col = rs.getString("COLUMN_NAME");
-                col = convertColumnName(col);
-                Column column = columnMap.get(col);
-                if (idx == 0) {
-                    // workaround for a bug in the SQLite JDBC driver
-                    list.add(column);
-                } else {
-                    list.set(idx - 1, column);
-                }
-            } while (rs.next());
-            addIndex(list, IndexType.createPrimaryKey(false, false));
-            rs.close();
-        }
-        try {
-            rs = meta.getIndexInfo(null, originalSchema, originalTable, false, true);
+        try (ResultSet rs = meta.getIndexInfo(null, originalSchema, originalTable, false, true)) {
+            readIndexes(rs, columnMap, pkName);
         } catch (Exception e) {
             // Oracle throws an exception if the table is not found or is a
             // SYNONYM
-            rs = null;
         }
-        String indexName = null;
-        list = Utils.newSmallArrayList();
-        IndexType indexType = null;
-        if (rs != null) {
-            while (rs.next()) {
-                if (rs.getShort("TYPE") == DatabaseMetaData.tableIndexStatistic) {
-                    // ignore index statistics
-                    continue;
-                }
-                String newIndex = rs.getString("INDEX_NAME");
-                if (pkName.equals(newIndex)) {
-                    continue;
-                }
-                if (indexName != null && !indexName.equals(newIndex)) {
-                    addIndex(list, indexType);
-                    indexName = null;
-                }
-                if (indexName == null) {
-                    indexName = newIndex;
-                    list.clear();
-                }
-                boolean unique = !rs.getBoolean("NON_UNIQUE");
-                indexType = unique ? IndexType.createUnique(false, false) :
-                        IndexType.createNonUnique(false);
-                String col = rs.getString("COLUMN_NAME");
-                col = convertColumnName(col);
-                Column column = columnMap.get(col);
-                list.add(column);
+    }
+
+    private String readPrimaryKey(ResultSet rs, HashMap<String, Column> columnMap) throws SQLException {
+        String pkName = null;
+        // the problem is, the rows are not sorted by KEY_SEQ
+        ArrayList<Column> list = Utils.newSmallArrayList();
+        do {
+            int idx = rs.getInt("KEY_SEQ");
+            if (StringUtils.isNullOrEmpty(pkName)) {
+                pkName = rs.getString("PK_NAME");
             }
-            rs.close();
+            while (list.size() < idx) {
+                list.add(null);
+            }
+            String col = rs.getString("COLUMN_NAME");
+            col = convertColumnName(col);
+            Column column = columnMap.get(col);
+            if (idx == 0) {
+                // workaround for a bug in the SQLite JDBC driver
+                list.add(column);
+            } else {
+                list.set(idx - 1, column);
+            }
+        } while (rs.next());
+        addIndex(list, IndexType.createPrimaryKey(false, false));
+        return pkName;
+    }
+
+    private void readIndexes(ResultSet rs, HashMap<String, Column> columnMap, String pkName) throws SQLException {
+        String indexName = null;
+        ArrayList<Column> list = Utils.newSmallArrayList();
+        IndexType indexType = null;
+        while (rs.next()) {
+            if (rs.getShort("TYPE") == DatabaseMetaData.tableIndexStatistic) {
+                // ignore index statistics
+                continue;
+            }
+            String newIndex = rs.getString("INDEX_NAME");
+            if (pkName != null && pkName.equals(newIndex)) {
+                continue;
+            }
+            if (indexName != null && !indexName.equals(newIndex)) {
+                addIndex(list, indexType);
+                indexName = null;
+            }
+            if (indexName == null) {
+                indexName = newIndex;
+                list.clear();
+            }
+            boolean unique = !rs.getBoolean("NON_UNIQUE");
+            indexType = unique ? IndexType.createUnique(false, false) :
+                    IndexType.createNonUnique(false);
+            String col = rs.getString("COLUMN_NAME");
+            col = convertColumnName(col);
+            Column column = columnMap.get(col);
+            list.add(column);
         }
         if (indexName != null) {
             addIndex(list, indexType);
@@ -356,7 +362,8 @@ public class TableLink extends Table {
 
     @Override
     public String getDropSQL() {
-        return "DROP TABLE IF EXISTS " + getSQL();
+        StringBuilder builder = new StringBuilder("DROP TABLE IF EXISTS ");
+        return getSQL(builder, DEFAULT_SQL_FLAGS).toString();
     }
 
     @Override
@@ -370,21 +377,18 @@ public class TableLink extends Table {
             }
             buff.append("TEMPORARY ");
         }
-        buff.append("LINKED TABLE ").append(getSQL());
+        buff.append("LINKED TABLE ");
+        getSQL(buff, DEFAULT_SQL_FLAGS);
         if (comment != null) {
-            buff.append(" COMMENT ").append(StringUtils.quoteStringSQL(comment));
+            buff.append(" COMMENT ");
+            StringUtils.quoteStringSQL(buff, comment);
         }
-        buff.append('(').
-            append(StringUtils.quoteStringSQL(driver)).
-            append(", ").
-            append(StringUtils.quoteStringSQL(url)).
-            append(", ").
-            append(StringUtils.quoteStringSQL(user)).
-            append(", ").
-            append(StringUtils.quoteStringSQL(password)).
-            append(", ").
-            append(StringUtils.quoteStringSQL(originalTable)).
-            append(')');
+        buff.append('(');
+        StringUtils.quoteStringSQL(buff, driver).append(", ");
+        StringUtils.quoteStringSQL(buff, url).append(", ");
+        StringUtils.quoteStringSQL(buff, user).append(", ");
+        StringUtils.quoteStringSQL(buff, password).append(", ");
+        StringUtils.quoteStringSQL(buff, originalTable).append(')');
         if (emitUpdates) {
             buff.append(" EMIT UPDATES");
         }
@@ -396,26 +400,20 @@ public class TableLink extends Table {
     }
 
     @Override
-    public Index addIndex(Session session, String indexName, int indexId,
+    public Index addIndex(SessionLocal session, String indexName, int indexId,
             IndexColumn[] cols, IndexType indexType, boolean create,
             String indexComment) {
         throw DbException.getUnsupportedException("LINK");
     }
 
     @Override
-    public boolean lock(Session session, boolean exclusive, boolean forceLockEvenInMvcc) {
-        // nothing to do
-        return false;
-    }
-
-    @Override
-    public boolean isLockedExclusively() {
-        return false;
-    }
-
-    @Override
-    public Index getScanIndex(Session session) {
+    public Index getScanIndex(SessionLocal session) {
         return linkedIndex;
+    }
+
+    @Override
+    public boolean isInsertable() {
+        return !readOnly;
     }
 
     private void checkReadOnly() {
@@ -425,19 +423,19 @@ public class TableLink extends Table {
     }
 
     @Override
-    public void removeRow(Session session, Row row) {
+    public void removeRow(SessionLocal session, Row row) {
         checkReadOnly();
         getScanIndex(session).remove(session, row);
     }
 
     @Override
-    public void addRow(Session session, Row row) {
+    public void addRow(SessionLocal session, Row row) {
         checkReadOnly();
         getScanIndex(session).add(session, row);
     }
 
     @Override
-    public void close(Session session) {
+    public void close(SessionLocal session) {
         if (conn != null) {
             try {
                 conn.close(false);
@@ -448,11 +446,11 @@ public class TableLink extends Table {
     }
 
     @Override
-    public synchronized long getRowCount(Session session) {
+    public synchronized long getRowCount(SessionLocal session) {
         //The foo alias is used to support the PostgreSQL syntax
         String sql = "SELECT COUNT(*) FROM " + qualifiedTableName + " as foo";
         try {
-            PreparedStatement prep = execute(sql, null, false);
+            PreparedStatement prep = execute(sql, null, false, session);
             ResultSet rs = prep.getResultSet();
             rs.next();
             long count = rs.getLong(1);
@@ -488,10 +486,11 @@ public class TableLink extends Table {
      * @param sql the SQL statement
      * @param params the parameters or null
      * @param reusePrepared if the prepared statement can be re-used immediately
+     * @param session the session
      * @return the prepared statement, or null if it is re-used
      */
-    public PreparedStatement execute(String sql, ArrayList<Value> params,
-            boolean reusePrepared) {
+    public PreparedStatement execute(String sql, ArrayList<Value> params, boolean reusePrepared, //
+            SessionLocal session) {
         if (conn == null) {
             throw connectException;
         }
@@ -503,24 +502,27 @@ public class TableLink extends Table {
                         prep = conn.getConnection().prepareStatement(sql);
                     }
                     if (trace.isDebugEnabled()) {
-                        StatementBuilder buff = new StatementBuilder();
-                        buff.append(getName()).append(":\n").append(sql);
+                        StringBuilder builder = new StringBuilder(getName()).append(":\n").append(sql);
                         if (params != null && !params.isEmpty()) {
-                            buff.append(" {");
-                            int i = 1;
-                            for (Value v : params) {
-                                buff.appendExceptFirst(", ");
-                                buff.append(i++).append(": ").append(v.getSQL());
+                            builder.append(" {");
+                            for (int i = 0, l = params.size(); i < l;) {
+                                Value v = params.get(i);
+                                if (i > 0) {
+                                    builder.append(", ");
+                                }
+                                builder.append(++i).append(": ");
+                                v.getSQL(builder, DEFAULT_SQL_FLAGS);
                             }
-                            buff.append('}');
+                            builder.append('}');
                         }
-                        buff.append(';');
-                        trace.debug(buff.toString());
+                        builder.append(';');
+                        trace.debug(builder.toString());
                     }
                     if (params != null) {
+                        JdbcConnection ownConnection = session.createConnection(false);
                         for (int i = 0, size = params.size(); i < size; i++) {
                             Value v = params.get(i);
-                            v.set(prep, i + 1);
+                            JdbcUtils.set(prep, i + 1, v, ownConnection);
                         }
                     }
                     prep.execute();
@@ -541,27 +543,17 @@ public class TableLink extends Table {
     }
 
     @Override
-    public void unlock(Session s) {
-        // nothing to do
-    }
-
-    @Override
-    public void checkRename() {
-        // ok
-    }
-
-    @Override
     public void checkSupportAlter() {
         throw DbException.getUnsupportedException("LINK");
     }
 
     @Override
-    public void truncate(Session session) {
+    public long truncate(SessionLocal session) {
         throw DbException.getUnsupportedException("LINK");
     }
 
     @Override
-    public boolean canGetRowCount() {
+    public boolean canGetRowCount(SessionLocal session) {
         return true;
     }
 
@@ -576,7 +568,7 @@ public class TableLink extends Table {
     }
 
     @Override
-    public void removeChildrenAndResources(Session session) {
+    public void removeChildrenAndResources(SessionLocal session) {
         super.removeChildrenAndResources(session);
         close(session);
         database.removeMeta(session, getId());
@@ -617,23 +609,18 @@ public class TableLink extends Table {
     }
 
     @Override
-    public void updateRows(Prepared prepared, Session session, RowList rows) {
-        boolean deleteInsert;
+    public void updateRows(Prepared prepared, SessionLocal session, RowList rows) {
         checkReadOnly();
         if (emitUpdates) {
             for (rows.reset(); rows.hasNext();) {
                 prepared.checkCanceled();
                 Row oldRow = rows.next();
                 Row newRow = rows.next();
-                linkedIndex.update(oldRow, newRow);
+                linkedIndex.update(oldRow, newRow, session);
                 session.log(this, UndoLogRecord.DELETE, oldRow);
                 session.log(this, UndoLogRecord.INSERT, newRow);
             }
-            deleteInsert = false;
         } else {
-            deleteInsert = true;
-        }
-        if (deleteInsert) {
             super.updateRows(prepared, session, rows);
         }
     }
@@ -647,13 +634,8 @@ public class TableLink extends Table {
     }
 
     @Override
-    public long getRowCountApproximation() {
+    public long getRowCountApproximation(SessionLocal session) {
         return ROW_COUNT_APPROXIMATION;
-    }
-
-    @Override
-    public long getDiskSpaceUsed() {
-        return 0;
     }
 
     /**
@@ -682,39 +664,28 @@ public class TableLink extends Table {
         // only the target database can verify this
     }
 
-    /**
-     * Convert the values if required. Default values are not set (kept as
-     * null).
-     *
-     * @param session the session
-     * @param row the row
-     */
     @Override
-    public void validateConvertUpdateSequence(Session session, Row row) {
+    public void convertInsertRow(SessionLocal session, Row row, Boolean overridingSystem) {
+        convertRow(session, row);
+    }
+
+    @Override
+    public void convertUpdateRow(SessionLocal session, Row row) {
+        convertRow(session, row);
+    }
+
+    private void convertRow(SessionLocal session, Row row) {
         for (int i = 0; i < columns.length; i++) {
             Value value = row.getValue(i);
             if (value != null) {
                 // null means use the default value
                 Column column = columns[i];
-                Value v2 = column.validateConvertUpdateSequence(session, value);
+                Value v2 = column.validateConvertUpdateSequence(session, value, row);
                 if (v2 != value) {
                     row.setValue(i, v2);
                 }
             }
         }
-    }
-
-    /**
-     * Get or generate a default value for the given column. Default values are
-     * not set (kept as null).
-     *
-     * @param session the session
-     * @param column the column
-     * @return the value
-     */
-    @Override
-    public Value getDefaultValue(Session session, Column column) {
-        return null;
     }
 
 }

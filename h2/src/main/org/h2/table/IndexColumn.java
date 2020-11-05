@@ -1,11 +1,13 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.table;
 
 import org.h2.result.SortOrder;
+import org.h2.util.HasSQL;
+import org.h2.util.ParserUtil;
 
 /**
  * This represents a column item of an index. This is required because some
@@ -14,9 +16,14 @@ import org.h2.result.SortOrder;
 public class IndexColumn {
 
     /**
+     * Do not append ordering.
+     */
+    public static final int SQL_NO_ORDER = 0x8000_0000;
+
+    /**
      * The column name.
      */
-    public String columnName;
+    public final String columnName;
 
     /**
      * The column, or null if not set.
@@ -30,14 +37,105 @@ public class IndexColumn {
     public int sortType = SortOrder.ASCENDING;
 
     /**
-     * Get the SQL snippet for this index column.
+     * Appends the specified columns to the specified builder.
      *
-     * @return the SQL snippet
+     * @param builder
+     *            string builder
+     * @param columns
+     *            index columns
+     * @param sqlFlags
+     *            formatting flags
+     * @return the specified string builder
      */
-    public String getSQL() {
-        StringBuilder buff = new StringBuilder(column.getSQL());
-        SortOrder.typeToString(buff, sortType);
-        return buff.toString();
+    public static StringBuilder writeColumns(StringBuilder builder, IndexColumn[] columns, int sqlFlags) {
+        for (int i = 0, l = columns.length; i < l; i++) {
+            if (i > 0) {
+                builder.append(", ");
+            }
+            columns[i].getSQL(builder,  sqlFlags);
+        }
+        return builder;
+    }
+
+    /**
+     * Appends the specified columns to the specified builder.
+     *
+     * @param builder
+     *            string builder
+     * @param columns
+     *            index columns
+     * @param separator
+     *            separator
+     * @param suffix
+     *            additional SQL to append after each column
+     * @param sqlFlags
+     *            formatting flags
+     * @return the specified string builder
+     */
+    public static StringBuilder writeColumns(StringBuilder builder, IndexColumn[] columns, String separator,
+            String suffix, int sqlFlags) {
+        for (int i = 0, l = columns.length; i < l; i++) {
+            if (i > 0) {
+                builder.append(separator);
+            }
+            columns[i].getSQL(builder, sqlFlags).append(suffix);
+        }
+        return builder;
+    }
+
+    /**
+     * Creates a new instance with the specified name.
+     *
+     * @param columnName
+     *            the column name
+     */
+    public IndexColumn(String columnName) {
+        this.columnName = columnName;
+    }
+
+    /**
+     * Creates a new instance with the specified name.
+     *
+     * @param columnName
+     *            the column name
+     * @param sortType
+     *            the sort type
+     */
+    public IndexColumn(String columnName, int sortType) {
+        this.columnName = columnName;
+        this.sortType = sortType;
+    }
+
+    /**
+     * Creates a new instance with the specified column.
+     *
+     * @param column
+     *            the column
+     */
+    public IndexColumn(Column column) {
+        columnName = null;
+        this.column = column;
+    }
+
+    /**
+     * Appends the SQL snippet for this index column to the specified string builder.
+     *
+     * @param builder
+     *            string builder
+     * @param sqlFlags
+     *            formatting flags
+     * @return the specified string builder
+     */
+    public StringBuilder getSQL(StringBuilder builder, int sqlFlags) {
+        if (column != null) {
+            column.getSQL(builder, sqlFlags);
+        } else {
+            ParserUtil.quoteIdentifier(builder, columnName, sqlFlags);
+        }
+        if ((sqlFlags & SQL_NO_ORDER) == 0) {
+            SortOrder.typeToString(builder, sortType);
+        }
+        return builder;
     }
 
     /**
@@ -50,8 +148,7 @@ public class IndexColumn {
     public static IndexColumn[] wrap(Column[] columns) {
         IndexColumn[] list = new IndexColumn[columns.length];
         for (int i = 0; i < list.length; i++) {
-            list[i] = new IndexColumn();
-            list[i].column = columns[i];
+            list[i] = new IndexColumn(columns[i]);
         }
         return list;
     }
@@ -70,6 +167,6 @@ public class IndexColumn {
 
     @Override
     public String toString() {
-        return "IndexColumn " + getSQL();
+        return getSQL(new StringBuilder("IndexColumn "), HasSQL.TRACE_SQL_FLAGS).toString();
     }
 }

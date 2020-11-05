@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.fulltext;
@@ -26,17 +26,16 @@ import java.util.UUID;
 
 import org.h2.api.Trigger;
 import org.h2.command.Parser;
-import org.h2.engine.Session;
-import org.h2.expression.Comparison;
-import org.h2.expression.ConditionAndOr;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
 import org.h2.expression.ExpressionColumn;
 import org.h2.expression.ValueExpression;
+import org.h2.expression.condition.Comparison;
+import org.h2.expression.condition.ConditionAndOr;
 import org.h2.jdbc.JdbcConnection;
 import org.h2.message.DbException;
 import org.h2.tools.SimpleResultSet;
 import org.h2.util.IOUtils;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
 import org.h2.util.Utils;
 
@@ -76,7 +75,7 @@ public class FullText {
     private static final String SELECT_MAP_BY_WORD_ID =
             "SELECT ROWID FROM " + SCHEMA + ".MAP WHERE WORDID=?";
     private static final String SELECT_ROW_BY_ID =
-            "SELECT KEY, INDEXID FROM " + SCHEMA + ".ROWS WHERE ID=?";
+            "SELECT `KEY`, INDEXID FROM " + SCHEMA + ".ROWS WHERE ID=?";
 
     /**
      * The column name of the result set returned by the search method.
@@ -110,32 +109,27 @@ public class FullText {
         stat.execute("CREATE SCHEMA IF NOT EXISTS " + SCHEMA);
         stat.execute("CREATE TABLE IF NOT EXISTS " + SCHEMA +
                 ".INDEXES(ID INT AUTO_INCREMENT PRIMARY KEY, " +
-                "SCHEMA VARCHAR, TABLE VARCHAR, COLUMNS VARCHAR, " +
-                "UNIQUE(SCHEMA, TABLE))");
+                "SCHEMA VARCHAR, `TABLE` VARCHAR, COLUMNS VARCHAR, " +
+                "UNIQUE(SCHEMA, `TABLE`))");
         stat.execute("CREATE TABLE IF NOT EXISTS " + SCHEMA +
                 ".WORDS(ID INT AUTO_INCREMENT PRIMARY KEY, " +
                 "NAME VARCHAR, UNIQUE(NAME))");
         stat.execute("CREATE TABLE IF NOT EXISTS " + SCHEMA +
                 ".ROWS(ID IDENTITY, HASH INT, INDEXID INT, " +
-                "KEY VARCHAR, UNIQUE(HASH, INDEXID, KEY))");
+                "`KEY` VARCHAR, UNIQUE(HASH, INDEXID, `KEY`))");
         stat.execute("CREATE TABLE IF NOT EXISTS " + SCHEMA +
                 ".MAP(ROWID INT, WORDID INT, PRIMARY KEY(WORDID, ROWID))");
         stat.execute("CREATE TABLE IF NOT EXISTS " + SCHEMA +
                 ".IGNORELIST(LIST VARCHAR)");
         stat.execute("CREATE TABLE IF NOT EXISTS " + SCHEMA +
-                ".SETTINGS(KEY VARCHAR PRIMARY KEY, VALUE VARCHAR)");
-        stat.execute("CREATE ALIAS IF NOT EXISTS FT_CREATE_INDEX FOR \"" +
-                FullText.class.getName() + ".createIndex\"");
-        stat.execute("CREATE ALIAS IF NOT EXISTS FT_DROP_INDEX FOR \"" +
-                FullText.class.getName() + ".dropIndex\"");
-        stat.execute("CREATE ALIAS IF NOT EXISTS FT_SEARCH FOR \"" +
-                FullText.class.getName() + ".search\"");
-        stat.execute("CREATE ALIAS IF NOT EXISTS FT_SEARCH_DATA FOR \"" +
-                FullText.class.getName() + ".searchData\"");
-        stat.execute("CREATE ALIAS IF NOT EXISTS FT_REINDEX FOR \"" +
-                FullText.class.getName() + ".reindex\"");
-        stat.execute("CREATE ALIAS IF NOT EXISTS FT_DROP_ALL FOR \"" +
-                FullText.class.getName() + ".dropAll\"");
+                ".SETTINGS(`KEY` VARCHAR PRIMARY KEY, `VALUE` VARCHAR)");
+        String className = FullText.class.getName();
+        stat.execute("CREATE ALIAS IF NOT EXISTS FT_CREATE_INDEX FOR '" + className + ".createIndex'");
+        stat.execute("CREATE ALIAS IF NOT EXISTS FT_DROP_INDEX FOR '" + className + ".dropIndex'");
+        stat.execute("CREATE ALIAS IF NOT EXISTS FT_SEARCH FOR '" + className + ".search'");
+        stat.execute("CREATE ALIAS IF NOT EXISTS FT_SEARCH_DATA FOR '" + className + ".searchData'");
+        stat.execute("CREATE ALIAS IF NOT EXISTS FT_REINDEX FOR '" + className + ".reindex'");
+        stat.execute("CREATE ALIAS IF NOT EXISTS FT_DROP_ALL FOR '" + className + ".dropAll'");
         FullTextSettings setting = FullTextSettings.getInstance(conn);
         ResultSet rs = stat.executeQuery("SELECT * FROM " + SCHEMA +
                 ".IGNORELIST");
@@ -176,7 +170,7 @@ public class FullText {
             String table, String columnList) throws SQLException {
         init(conn);
         PreparedStatement prep = conn.prepareStatement("INSERT INTO " + SCHEMA
-                + ".INDEXES(SCHEMA, TABLE, COLUMNS) VALUES(?, ?, ?)");
+                + ".INDEXES(SCHEMA, `TABLE`, COLUMNS) VALUES(?, ?, ?)");
         prep.setString(1, schema);
         prep.setString(2, table);
         prep.setString(3, columnList);
@@ -221,7 +215,7 @@ public class FullText {
             throws SQLException {
         init(conn);
         PreparedStatement prep = conn.prepareStatement("SELECT ID FROM " + SCHEMA
-                + ".INDEXES WHERE SCHEMA=? AND TABLE=?");
+                + ".INDEXES WHERE SCHEMA=? AND `TABLE`=?");
         prep.setString(1, schema);
         prep.setString(2, table);
         ResultSet rs = prep.executeQuery();
@@ -446,8 +440,8 @@ public class FullText {
         if (data) {
             result.addColumn(FullText.FIELD_SCHEMA, Types.VARCHAR, 0, 0);
             result.addColumn(FullText.FIELD_TABLE, Types.VARCHAR, 0, 0);
-            result.addColumn(FullText.FIELD_COLUMNS, Types.ARRAY, 0, 0);
-            result.addColumn(FullText.FIELD_KEYS, Types.ARRAY, 0, 0);
+            result.addColumn(FullText.FIELD_COLUMNS, Types.ARRAY, "VARCHAR ARRAY", 0, 0);
+            result.addColumn(FullText.FIELD_KEYS, Types.ARRAY, "VARCHAR ARRAY", 0, 0);
         } else {
             result.addColumn(FullText.FIELD_QUERY, Types.VARCHAR, 0, 0);
         }
@@ -462,17 +456,17 @@ public class FullText {
      * @param key the primary key condition as a string
      * @return an array containing the column name list and the data list
      */
-    protected static Object[][] parseKey(Connection conn, String key) {
+    protected static String[][] parseKey(Connection conn, String key) {
         ArrayList<String> columns = Utils.newSmallArrayList();
         ArrayList<String> data = Utils.newSmallArrayList();
         JdbcConnection c = (JdbcConnection) conn;
-        Session session = (Session) c.getSession();
+        SessionLocal session = (SessionLocal) c.getSession();
         Parser p = new Parser(session);
         Expression expr = p.parseExpression(key);
-        addColumnData(columns, data, expr);
-        Object[] col = columns.toArray();
-        Object[] dat = data.toArray();
-        Object[][] columnData = { col, dat };
+        addColumnData(session, columns, data, expr);
+        String[] col = columns.toArray(new String[0]);
+        String[] dat = data.toArray(new String[0]);
+        String[][] columnData = { col, dat };
         return columnData;
     }
 
@@ -514,7 +508,10 @@ public class FullText {
             if (data instanceof UUID) {
                 return "'" + data.toString() + "'";
             }
-            return "'" + StringUtils.convertBytesToHex((byte[]) data) + "'";
+            byte[] bytes = (byte[]) data;
+            StringBuilder builder = new StringBuilder(bytes.length * 2 + 2).append('\'');
+            StringUtils.convertBytesToHex(builder, bytes).append('\'');
+            return builder.toString();
         case Types.CLOB:
         case Types.JAVA_OBJECT:
         case Types.OTHER:
@@ -540,7 +537,8 @@ public class FullText {
     protected static void removeAllTriggers(Connection conn, String prefix)
             throws SQLException {
         Statement stat = conn.createStatement();
-        ResultSet rs = stat.executeQuery("SELECT * FROM INFORMATION_SCHEMA.TRIGGERS");
+        ResultSet rs = stat.executeQuery(
+                "SELECT DISTINCT TRIGGER_SCHEMA, TRIGGER_NAME FROM INFORMATION_SCHEMA.TRIGGERS");
         Statement stat2 = conn.createStatement();
         while (rs.next()) {
             String schema = rs.getString("TRIGGER_SCHEMA");
@@ -616,7 +614,7 @@ public class FullText {
             if (wId == null) {
                 continue;
             }
-            prepSelectMapByWordId.setInt(1, wId.intValue());
+            prepSelectMapByWordId.setInt(1, wId);
             ResultSet rs = prepSelectMapByWordId.executeQuery();
             while (rs.next()) {
                 Integer rId = rs.getInt(1);
@@ -643,7 +641,7 @@ public class FullText {
                 int indexId = rs.getInt(2);
                 IndexInfo index = setting.getIndexInfo(indexId);
                 if (data) {
-                    Object[][] columnData = parseKey(conn, key);
+                    String[][] columnData = parseKey(conn, key);
                     result.addRow(
                             index.schema,
                             index.table,
@@ -665,16 +663,16 @@ public class FullText {
         return result;
     }
 
-    private static void addColumnData(ArrayList<String> columns,
-            ArrayList<String> data, Expression expr) {
+    private static void addColumnData(SessionLocal session, ArrayList<String> columns, ArrayList<String> data,
+            Expression expr) {
         if (expr instanceof ConditionAndOr) {
             ConditionAndOr and = (ConditionAndOr) expr;
-            addColumnData(columns, data, and.getSubexpression(0));
-            addColumnData(columns, data, and.getSubexpression(1));
+            addColumnData(session, columns, data, and.getSubexpression(0));
+            addColumnData(session, columns, data, and.getSubexpression(1));
         } else {
             Comparison comp = (Comparison) expr;
             ExpressionColumn ec = (ExpressionColumn) comp.getSubexpression(0);
-            String columnName = ec.getColumnName();
+            String columnName = ec.getColumnName(session, -1);
             columns.add(columnName);
             if (expr.getSubexpressionCount() == 1) {
                 data.add(null);
@@ -769,13 +767,13 @@ public class FullText {
                 if(!multiThread) {
                     buff.append(", ROLLBACK");
                 }
-                buff.append(" ON ").
-                        append(StringUtils.quoteIdentifier(schema)).
-                        append('.').
-                        append(StringUtils.quoteIdentifier(table)).
+                buff.append(" ON ");
+                StringUtils.quoteIdentifier(buff, schema).
+                        append('.');
+                StringUtils.quoteIdentifier(buff, table).
                         append(" FOR EACH ROW CALL \"").
                         append(FullText.FullTextTrigger.class.getName()).
-                        append('\"');
+                        append('"');
                 stat.execute(buff.toString());
             }
         }
@@ -873,11 +871,11 @@ public class FullText {
 
         private static final String SQL[] = {
             "MERGE INTO " + SCHEMA + ".WORDS(NAME) KEY(NAME) VALUES(?)",
-            "INSERT INTO " + SCHEMA + ".ROWS(HASH, INDEXID, KEY) VALUES(?, ?, ?)",
+            "INSERT INTO " + SCHEMA + ".ROWS(HASH, INDEXID, `KEY`) VALUES(?, ?, ?)",
             "INSERT INTO " + SCHEMA + ".MAP(ROWID, WORDID) VALUES(?, ?)",
-            "DELETE FROM " + SCHEMA + ".ROWS WHERE HASH=? AND INDEXID=? AND KEY=?",
+            "DELETE FROM " + SCHEMA + ".ROWS WHERE HASH=? AND INDEXID=? AND `KEY`=?",
             "DELETE FROM " + SCHEMA + ".MAP WHERE ROWID=? AND WORDID=?",
-            "SELECT ID FROM " + SCHEMA + ".ROWS WHERE HASH=? AND INDEXID=? AND KEY=?"
+            "SELECT ID FROM " + SCHEMA + ".ROWS WHERE HASH=? AND INDEXID=? AND `KEY`=?"
         };
 
         /**
@@ -926,7 +924,7 @@ public class FullText {
             ArrayList<String> indexList = Utils.newSmallArrayList();
             PreparedStatement prep = conn.prepareStatement(
                     "SELECT ID, COLUMNS FROM " + SCHEMA + ".INDEXES" +
-                    " WHERE SCHEMA=? AND TABLE=?");
+                    " WHERE SCHEMA=? AND `TABLE`=?");
             prep.setString(1, schemaName);
             prep.setString(2, tableName);
             rs = prep.executeQuery();
@@ -965,9 +963,9 @@ public class FullText {
                 throws SQLException {
             try (Statement stat = conn.createStatement()) {
                 ResultSet rs = stat.executeQuery(
-                                "SELECT value FROM information_schema.settings" +
-                                " WHERE name = 'MULTI_THREADED'");
-                return rs.next() && !"0".equals(rs.getString(1));
+                                "SELECT SETTING_VALUE FROM INFORMATION_SCHEMA.SETTINGS" +
+                                " WHERE SETTING_NAME = 'MV_STORE'");
+                return rs.next() && "true".equals(rs.getString(1));
             }
         }
 
@@ -1139,18 +1137,22 @@ public class FullText {
         }
 
         private String getKey(Object[] row) throws SQLException {
-            StatementBuilder buff = new StatementBuilder();
-            for (int columnIndex : index.keys) {
-                buff.appendExceptFirst(" AND ");
-                buff.append(StringUtils.quoteIdentifier(index.columns[columnIndex]));
+            StringBuilder builder = new StringBuilder();
+            int[] keys = index.keys;
+            for (int i = 0, l = keys.length; i < l; i++) {
+                if (i > 0) {
+                    builder.append(" AND ");
+                }
+                int columnIndex = keys[i];
+                StringUtils.quoteIdentifier(builder, index.columns[columnIndex]);
                 Object o = row[columnIndex];
                 if (o == null) {
-                    buff.append(" IS NULL");
+                    builder.append(" IS NULL");
                 } else {
-                    buff.append('=').append(quoteSQL(o, columnTypes[columnIndex]));
+                    builder.append('=').append(quoteSQL(o, columnTypes[columnIndex]));
                 }
             }
-            return buff.toString();
+            return builder.toString();
         }
 
         private PreparedStatement getStatement(Connection conn, int index) throws SQLException {

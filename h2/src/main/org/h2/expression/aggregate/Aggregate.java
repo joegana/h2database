@@ -1,22 +1,35 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression.aggregate;
 
+import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map.Entry;
+import java.util.TreeMap;
+
 import org.h2.api.ErrorCode;
-import org.h2.command.dml.Select;
-import org.h2.command.dml.SelectOrderBy;
+import org.h2.command.query.QueryOrderBy;
+import org.h2.command.query.Select;
+import org.h2.engine.Constants;
 import org.h2.engine.Database;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
 import org.h2.expression.ExpressionColumn;
 import org.h2.expression.ExpressionVisitor;
+import org.h2.expression.ExpressionWithFlags;
+import org.h2.expression.ValueExpression;
+import org.h2.expression.analysis.Window;
+import org.h2.expression.function.BitFunction;
+import org.h2.expression.function.JsonConstructorFunction;
 import org.h2.index.Cursor;
 import org.h2.index.Index;
 import org.h2.message.DbException;
@@ -27,176 +40,57 @@ import org.h2.table.Column;
 import org.h2.table.ColumnResolver;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
+import org.h2.util.json.JsonConstructorUtils;
+import org.h2.value.CompareMode;
 import org.h2.value.DataType;
+import org.h2.value.ExtTypeInfoRow;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 import org.h2.value.ValueArray;
+import org.h2.value.ValueBigint;
 import org.h2.value.ValueBoolean;
 import org.h2.value.ValueDouble;
-import org.h2.value.ValueInt;
-import org.h2.value.ValueLong;
+import org.h2.value.ValueInteger;
+import org.h2.value.ValueJson;
 import org.h2.value.ValueNull;
-import org.h2.value.ValueString;
+import org.h2.value.ValueRow;
+import org.h2.value.ValueVarchar;
 
 /**
  * Implements the integrated aggregate functions, such as COUNT, MAX, SUM.
  */
-public class Aggregate extends AbstractAggregate {
-
-    public enum AggregateType {
-        /**
-         * The aggregate type for COUNT(*).
-         */
-        COUNT_ALL,
-
-        /**
-         * The aggregate type for COUNT(expression).
-         */
-        COUNT,
-
-        /**
-         * The aggregate type for GROUP_CONCAT(...).
-         */
-        GROUP_CONCAT,
-
-        /**
-         * The aggregate type for SUM(expression).
-         */
-        SUM,
-
-        /**
-         * The aggregate type for MIN(expression).
-         */
-        MIN,
-
-        /**
-         * The aggregate type for MAX(expression).
-         */
-        MAX,
-
-        /**
-         * The aggregate type for AVG(expression).
-         */
-        AVG,
-
-        /**
-         * The aggregate type for STDDEV_POP(expression).
-         */
-        STDDEV_POP,
-
-        /**
-         * The aggregate type for STDDEV_SAMP(expression).
-         */
-        STDDEV_SAMP,
-
-        /**
-         * The aggregate type for VAR_POP(expression).
-         */
-        VAR_POP,
-
-        /**
-         * The aggregate type for VAR_SAMP(expression).
-         */
-        VAR_SAMP,
-
-        /**
-         * The aggregate type for BOOL_OR(expression).
-         */
-        BOOL_OR,
-
-        /**
-         * The aggregate type for BOOL_AND(expression).
-         */
-        BOOL_AND,
-
-        /**
-         * The aggregate type for BOOL_OR(expression).
-         */
-        BIT_OR,
-
-        /**
-         * The aggregate type for BOOL_AND(expression).
-         */
-        BIT_AND,
-
-        /**
-         * The aggregate type for SELECTIVITY(expression).
-         */
-        SELECTIVITY,
-
-        /**
-         * The aggregate type for HISTOGRAM(expression).
-         */
-        HISTOGRAM,
-
-        /**
-         * The aggregate type for MEDIAN(expression).
-         */
-        MEDIAN,
-
-        /**
-         * The aggregate type for ARRAY_AGG(expression).
-         */
-        ARRAY_AGG,
-
-        /**
-         * The aggregate type for MODE(expression).
-         */
-        MODE,
-
-        /**
-         * The aggregate type for ENVELOPE(expression).
-         */
-        ENVELOPE,
-    }
-
-    /**
-     * Reset stage. Used to reset internal data to its initial state.
-     */
-    public static final int STAGE_RESET = 0;
-
-    /**
-     * Group stage, used for explicit or implicit GROUP BY operation.
-     */
-    public static final int STAGE_GROUP = 1;
-
-    /**
-     * Window processing stage.
-     */
-    public static final int STAGE_WINDOW = 2;
+public class Aggregate extends AbstractAggregate implements ExpressionWithFlags {
 
     private static final HashMap<String, AggregateType> AGGREGATES = new HashMap<>(64);
 
-    private final AggregateType type;
+    private final AggregateType aggregateType;
 
-    private Expression on;
-    private Expression groupConcatSeparator;
-    private ArrayList<SelectOrderBy> orderByList;
+    private ArrayList<QueryOrderBy> orderByList;
     private SortOrder orderBySort;
-    private int dataType, scale;
-    private long precision;
-    private int displaySize;
+
+    private Object extraArguments;
+
+    private int flags;
 
     /**
      * Create a new aggregate object.
      *
-     * @param type
+     * @param aggregateType
      *            the aggregate type
-     * @param on
-     *            the aggregated expression
+     * @param args
+     *            the aggregated expressions
      * @param select
      *            the select statement
      * @param distinct
      *            if distinct is used
      */
-    public Aggregate(AggregateType type, Expression on, Select select, boolean distinct) {
-        super(select, distinct);
-        if (distinct && type == AggregateType.COUNT_ALL) {
-            throw DbException.throwInternalError();
+    public Aggregate(AggregateType aggregateType, Expression[] args, Select select, boolean distinct) {
+        super(select, args, distinct);
+        if (distinct && aggregateType == AggregateType.COUNT_ALL) {
+            throw DbException.getInternalError();
         }
-        this.type = type;
-        this.on = on;
+        this.aggregateType = aggregateType;
     }
 
     static {
@@ -208,9 +102,11 @@ public class Aggregate extends AbstractAggregate {
         addAggregate("MIN", AggregateType.MIN);
         addAggregate("MAX", AggregateType.MAX);
         addAggregate("AVG", AggregateType.AVG);
-        addAggregate("GROUP_CONCAT", AggregateType.GROUP_CONCAT);
+        addAggregate("LISTAGG", AggregateType.LISTAGG);
+        // MySQL compatibility: group_concat(expression, delimiter)
+        addAggregate("GROUP_CONCAT", AggregateType.LISTAGG);
         // PostgreSQL compatibility: string_agg(expression, delimiter)
-        addAggregate("STRING_AGG", AggregateType.GROUP_CONCAT);
+        addAggregate("STRING_AGG", AggregateType.LISTAGG);
         addAggregate("STDDEV_SAMP", AggregateType.STDDEV_SAMP);
         addAggregate("STDDEV", AggregateType.STDDEV_SAMP);
         addAggregate("STDDEV_POP", AggregateType.STDDEV_POP);
@@ -220,22 +116,40 @@ public class Aggregate extends AbstractAggregate {
         addAggregate("VAR_SAMP", AggregateType.VAR_SAMP);
         addAggregate("VAR", AggregateType.VAR_SAMP);
         addAggregate("VARIANCE", AggregateType.VAR_SAMP);
-        addAggregate("BOOL_OR", AggregateType.BOOL_OR);
-        // HSQLDB compatibility, but conflicts with x > EVERY(...)
-        addAggregate("SOME", AggregateType.BOOL_OR);
-        addAggregate("BOOL_AND", AggregateType.BOOL_AND);
-        // HSQLDB compatibility, but conflicts with x > SOME(...)
-        addAggregate("EVERY", AggregateType.BOOL_AND);
-        addAggregate("SELECTIVITY", AggregateType.SELECTIVITY);
+        addAggregate("ANY", AggregateType.ANY);
+        addAggregate("SOME", AggregateType.ANY);
+        // PostgreSQL compatibility
+        addAggregate("BOOL_OR", AggregateType.ANY);
+        addAggregate("EVERY", AggregateType.EVERY);
+        // PostgreSQL compatibility
+        addAggregate("BOOL_AND", AggregateType.EVERY);
         addAggregate("HISTOGRAM", AggregateType.HISTOGRAM);
-        addAggregate("BIT_OR", AggregateType.BIT_OR);
-        addAggregate("BIT_AND", AggregateType.BIT_AND);
+        addAggregate("BIT_AND_AGG", AggregateType.BIT_AND_AGG);
+        addAggregate("BIT_AND", AggregateType.BIT_AND_AGG);
+        addAggregate("BIT_OR_AGG", AggregateType.BIT_OR_AGG);
+        addAggregate("BIT_OR", AggregateType.BIT_OR_AGG);
+        addAggregate("BIT_XOR_AGG", AggregateType.BIT_XOR_AGG);
+        addAggregate("BIT_NAND_AGG", AggregateType.BIT_NAND_AGG);
+        addAggregate("BIT_NOR_AGG", AggregateType.BIT_NOR_AGG);
+        addAggregate("BIT_XNOR_AGG", AggregateType.BIT_XNOR_AGG);
+
+        addAggregate("RANK", AggregateType.RANK);
+        addAggregate("DENSE_RANK", AggregateType.DENSE_RANK);
+        addAggregate("PERCENT_RANK", AggregateType.PERCENT_RANK);
+        addAggregate("CUME_DIST", AggregateType.CUME_DIST);
+
+        addAggregate("PERCENTILE_CONT", AggregateType.PERCENTILE_CONT);
+        addAggregate("PERCENTILE_DISC", AggregateType.PERCENTILE_DISC);
         addAggregate("MEDIAN", AggregateType.MEDIAN);
+
         addAggregate("ARRAY_AGG", AggregateType.ARRAY_AGG);
         addAggregate("MODE", AggregateType.MODE);
         // Oracle compatibility
         addAggregate("STATS_MODE", AggregateType.MODE);
         addAggregate("ENVELOPE", AggregateType.ENVELOPE);
+
+        addAggregate("JSON_OBJECTAGG", AggregateType.JSON_OBJECTAGG);
+        addAggregate("JSON_ARRAYAGG", AggregateType.JSON_ARRAYAGG);
     }
 
     private static void addAggregate(String name, AggregateType type) {
@@ -261,135 +175,203 @@ public class Aggregate extends AbstractAggregate {
      * @param orderByList
      *            the order by list
      */
-    public void setOrderByList(ArrayList<SelectOrderBy> orderByList) {
+    public void setOrderByList(ArrayList<QueryOrderBy> orderByList) {
         this.orderByList = orderByList;
     }
 
     /**
-     * Set the separator for the GROUP_CONCAT() aggregate.
+     * Returns the type of this aggregate.
      *
-     * @param separator
-     *            the separator expression
+     * @return the type of this aggregate
      */
-    public void setGroupConcatSeparator(Expression separator) {
-        this.groupConcatSeparator = separator;
+    public AggregateType getAggregateType() {
+        return aggregateType;
+    }
+
+    /**
+     * Sets the additional arguments.
+     *
+     * @param extraArguments the additional arguments
+     */
+    public void setExtraArguments(Object extraArguments) {
+        this.extraArguments = extraArguments;
+    }
+
+    /**
+     * Returns the additional arguments.
+     *
+     * @return the additional arguments
+     */
+    public Object getExtraArguments() {
+        return extraArguments;
+    }
+
+    @Override
+    public void setFlags(int flags) {
+        this.flags = flags;
+    }
+
+    @Override
+    public int getFlags() {
+        return flags;
     }
 
     private void sortWithOrderBy(Value[] array) {
         final SortOrder sortOrder = orderBySort;
-        if (sortOrder != null) {
-            Arrays.sort(array, new Comparator<Value>() {
-                @Override
-                public int compare(Value v1, Value v2) {
-                    return sortOrder.compare(((ValueArray) v1).getList(), ((ValueArray) v2).getList());
-                }
-            });
-        } else {
-            Arrays.sort(array, select.getSession().getDatabase().getCompareMode());
-        }
+        Arrays.sort(array,
+                sortOrder != null
+                        ? (v1, v2) -> sortOrder.compare(((ValueRow) v1).getList(), ((ValueRow) v2).getList())
+                        : select.getSession().getDatabase().getCompareMode());
     }
 
     @Override
-    protected void updateAggregate(Session session, Object aggregateData) {
+    protected void updateAggregate(SessionLocal session, Object aggregateData) {
         AggregateData data = (AggregateData) aggregateData;
-        Value v = on == null ? null : on.getValue(session);
+        Value v = args.length == 0 ? null : args[0].getValue(session);
         updateData(session, data, v, null);
     }
 
-    private void updateData(Session session, AggregateData data, Value v, Value[] remembered) {
-        if (type == AggregateType.GROUP_CONCAT) {
-            if (v != ValueNull.INSTANCE) {
-                v = updateCollecting(session, v.convertTo(Value.STRING), remembered);
+    private void updateData(SessionLocal session, AggregateData data, Value v, Value[] remembered) {
+        switch (aggregateType) {
+        case LISTAGG:
+            if (v == ValueNull.INSTANCE) {
+                return;
             }
-        } else if (type == AggregateType.ARRAY_AGG) {
-            if (v != ValueNull.INSTANCE) {
-                v = updateCollecting(session, v, remembered);
+            v = updateCollecting(session, v.convertTo(TypeInfo.TYPE_VARCHAR), remembered);
+            break;
+        case ARRAY_AGG:
+            v = updateCollecting(session, v, remembered);
+            break;
+        case RANK:
+        case DENSE_RANK:
+        case PERCENT_RANK:
+        case CUME_DIST: {
+            int count = args.length;
+            Value[] a = new Value[count];
+            for (int i = 0; i < count; i++) {
+                a[i] = remembered != null ? remembered[i] : args[i].getValue(session);
             }
+            ((AggregateDataCollecting) data).setSharedArgument(ValueRow.get(a));
+            a = new Value[count];
+            for (int i = 0; i < count; i++) {
+                a[i] = remembered != null ? remembered[count + i] : orderByList.get(i).expression.getValue(session);
+            }
+            v = ValueRow.get(a);
+            break;
         }
-        data.add(session.getDatabase(), dataType, v);
+        case PERCENTILE_CONT:
+        case PERCENTILE_DISC:
+            ((AggregateDataCollecting) data).setSharedArgument(v);
+            v = remembered != null ? remembered[1] : orderByList.get(0).expression.getValue(session);
+            break;
+        case MODE:
+            v = remembered != null ? remembered[0] : orderByList.get(0).expression.getValue(session);
+            break;
+        case JSON_ARRAYAGG:
+            v = updateCollecting(session, v, remembered);
+            break;
+        case JSON_OBJECTAGG: {
+            Value key = v;
+            Value value = remembered != null ? remembered[1] : args[1].getValue(session);
+            if (key == ValueNull.INSTANCE) {
+                throw DbException.getInvalidValueException("JSON_OBJECTAGG key", "NULL");
+            }
+            v = ValueRow.get(new Value[] { key, value });
+            break;
+        }
+        default:
+            // Use argument as is
+        }
+        data.add(session, v);
     }
 
     @Override
-    protected void updateGroupAggregates(Session session, int stage) {
+    protected void updateGroupAggregates(SessionLocal session, int stage) {
         super.updateGroupAggregates(session, stage);
-        if (on != null) {
-            on.updateAggregate(session, stage);
+        for (Expression arg : args) {
+            arg.updateAggregate(session, stage);
         }
         if (orderByList != null) {
-            for (SelectOrderBy orderBy : orderByList) {
+            for (QueryOrderBy orderBy : orderByList) {
                 orderBy.expression.updateAggregate(session, stage);
             }
         }
     }
 
-    private Value updateCollecting(Session session, Value v, Value[] remembered) {
+    private Value updateCollecting(SessionLocal session, Value v, Value[] remembered) {
         if (orderByList != null) {
             int size = orderByList.size();
-            Value[] array = new Value[1 + size];
-            array[0] = v;
+            Value[] row = new Value[1 + size];
+            row[0] = v;
             if (remembered == null) {
                 for (int i = 0; i < size; i++) {
-                    SelectOrderBy o = orderByList.get(i);
-                    array[i + 1] = o.expression.getValue(session);
+                    QueryOrderBy o = orderByList.get(i);
+                    row[i + 1] = o.expression.getValue(session);
                 }
             } else {
-                for (int i = 1; i <= size; i++) {
-                    array[i] = remembered[i];
-                }
+                System.arraycopy(remembered, 1, row, 1, size);
             }
-            v = ValueArray.get(array);
+            v = ValueRow.get(row);
         }
         return v;
     }
 
     @Override
     protected int getNumExpressions() {
-        int n = on != null ? 1 : 0;
+        int n = args.length;
         if (orderByList != null) {
             n += orderByList.size();
+        }
+        if (filterCondition != null) {
+            n++;
         }
         return n;
     }
 
     @Override
-    protected void rememberExpressions(Session session, Value[] array) {
+    protected void rememberExpressions(SessionLocal session, Value[] array) {
         int offset = 0;
-        if (on != null) {
-            array[offset++] = on.getValue(session);
+        for (Expression arg : args) {
+            array[offset++] = arg.getValue(session);
         }
         if (orderByList != null) {
-            for (SelectOrderBy o : orderByList) {
+            for (QueryOrderBy o : orderByList) {
                 array[offset++] = o.expression.getValue(session);
             }
+        }
+        if (filterCondition != null) {
+            array[offset] = ValueBoolean.get(filterCondition.getBooleanValue(session));
         }
     }
 
     @Override
-    protected void updateFromExpressions(Session session, Object aggregateData, Value[] array) {
-        AggregateData data = (AggregateData) aggregateData;
-        Value v = on == null ? null : array[0];
-        updateData(session, data, v, array);
+    protected void updateFromExpressions(SessionLocal session, Object aggregateData, Value[] array) {
+        if (filterCondition == null || array[getNumExpressions() - 1].getBoolean()) {
+            AggregateData data = (AggregateData) aggregateData;
+            Value v = args.length == 0 ? null : array[0];
+            updateData(session, data, v, array);
+        }
     }
 
     @Override
     protected Object createAggregateData() {
-        return AggregateData.create(type, distinct);
+        return AggregateData.create(aggregateType, distinct, type, orderByList != null, flags);
     }
 
     @Override
-    public Value getValue(Session session) {
+    public Value getValue(SessionLocal session) {
         return select.isQuickAggregateQuery() ? getValueQuick(session) : super.getValue(session);
     }
 
-    private Value getValueQuick(Session session) {
-        switch (type) {
+    private Value getValueQuick(SessionLocal session) {
+        switch (aggregateType) {
         case COUNT:
         case COUNT_ALL:
             Table table = select.getTopTableFilter().getTable();
-            return ValueLong.get(table.getRowCount(session));
+            return ValueBigint.get(table.getRowCount(session));
         case MIN:
         case MAX: {
-            boolean first = type == AggregateType.MIN;
+            boolean first = aggregateType == AggregateType.MIN;
             Index index = getMinMaxColumnIndex();
             int sortType = index.getIndexColumns()[0].sortType;
             if ((sortType & SortOrder.DESCENDING) != 0) {
@@ -405,25 +387,40 @@ public class Aggregate extends AbstractAggregate {
             }
             return v;
         }
+        case PERCENTILE_CONT:
+        case PERCENTILE_DISC: {
+            Value v = args[0].getValue(session);
+            if (v == ValueNull.INSTANCE) {
+                return ValueNull.INSTANCE;
+            }
+            BigDecimal arg = v.getBigDecimal();
+            if (arg.signum() >= 0 && arg.compareTo(BigDecimal.ONE) <= 0) {
+                return Percentile.getFromIndex(session, orderByList.get(0).expression, type.getValueType(),
+                        orderByList, arg, aggregateType == AggregateType.PERCENTILE_CONT);
+            } else {
+                throw DbException.getInvalidValueException(aggregateType == AggregateType.PERCENTILE_CONT ?
+                        "PERCENTILE_CONT argument" : "PERCENTILE_DISC argument", arg);
+            }
+        }
         case MEDIAN:
-            return AggregateMedian.medianFromIndex(session, on, dataType);
+            return Percentile.getFromIndex(session, args[0], type.getValueType(), orderByList, Percentile.HALF, true);
         case ENVELOPE:
-            return ((MVSpatialIndex) AggregateDataEnvelope.getGeometryColumnIndex(on)).getBounds(session);
+            return ((MVSpatialIndex) AggregateDataEnvelope.getGeometryColumnIndex(args[0])).getBounds(session);
         default:
-            throw DbException.throwInternalError("type=" + type);
+            throw DbException.getInternalError("type=" + aggregateType);
         }
     }
 
     @Override
-    public Value getAggregatedValue(Session session, Object aggregateData) {
+    public Value getAggregatedValue(SessionLocal session, Object aggregateData) {
         AggregateData data = (AggregateData) aggregateData;
         if (data == null) {
             data = (AggregateData) createAggregateData();
         }
-        switch (type) {
+        switch (aggregateType) {
         case COUNT:
             if (distinct) {
-                return ValueLong.get(((AggregateDataCollecting) data).getCount());
+                return ValueBigint.get(((AggregateDataCollecting) data).getCount());
             }
             break;
         case SUM:
@@ -432,46 +429,24 @@ public class Aggregate extends AbstractAggregate {
         case STDDEV_SAMP:
         case VAR_POP:
         case VAR_SAMP:
+        case BIT_XOR_AGG:
+        case BIT_XNOR_AGG:
             if (distinct) {
                 AggregateDataCollecting c = ((AggregateDataCollecting) data);
                 if (c.getCount() == 0) {
                     return ValueNull.INSTANCE;
                 }
-                AggregateDataDefault d = new AggregateDataDefault(type);
-                Database db = session.getDatabase();
+                AggregateDataDefault d = new AggregateDataDefault(aggregateType, type);
                 for (Value v : c) {
-                    d.add(db, dataType, v);
+                    d.add(session, v);
                 }
-                return d.getValue(db, dataType);
+                return d.getValue(session);
             }
             break;
-        case GROUP_CONCAT: {
-            Value[] array = ((AggregateDataCollecting) data).getArray();
-            if (array == null) {
-                return ValueNull.INSTANCE;
-            }
-            if (orderByList != null || distinct) {
-                sortWithOrderBy(array);
-            }
-            StatementBuilder buff = new StatementBuilder();
-            String sep = groupConcatSeparator == null ? "," : groupConcatSeparator.getValue(session).getString();
-            for (Value val : array) {
-                String s;
-                if (val.getType() == Value.ARRAY) {
-                    s = ((ValueArray) val).getList()[0].getString();
-                } else {
-                    s = val.getString();
-                }
-                if (s == null) {
-                    continue;
-                }
-                if (sep != null) {
-                    buff.appendExceptFirst(sep);
-                }
-                buff.append(s);
-            }
-            return ValueString.get(buff.toString());
-        }
+        case HISTOGRAM:
+            return getHistogram(session, data);
+        case LISTAGG:
+            return getListagg(session, data);
         case ARRAY_AGG: {
             Value[] array = ((AggregateDataCollecting) data).getArray();
             if (array == null) {
@@ -482,221 +457,468 @@ public class Aggregate extends AbstractAggregate {
             }
             if (orderByList != null) {
                 for (int i = 0; i < array.length; i++) {
-                    array[i] = ((ValueArray) array[i]).getList()[0];
+                    array[i] = ((ValueRow) array[i]).getList()[0];
                 }
             }
-            return ValueArray.get(array);
+            return ValueArray.get((TypeInfo) type.getExtTypeInfo(), array, session);
+        }
+        case RANK:
+        case DENSE_RANK:
+        case PERCENT_RANK:
+        case CUME_DIST:
+            return getHypotheticalSet(session, data);
+        case PERCENTILE_CONT:
+        case PERCENTILE_DISC: {
+            AggregateDataCollecting collectingData = (AggregateDataCollecting) data;
+            Value[] array = collectingData.getArray();
+            if (array == null) {
+                return ValueNull.INSTANCE;
+            }
+            Value v = collectingData.getSharedArgument();
+            if (v == ValueNull.INSTANCE) {
+                return ValueNull.INSTANCE;
+            }
+            BigDecimal arg = v.getBigDecimal();
+            if (arg.signum() >= 0 && arg.compareTo(BigDecimal.ONE) <= 0) {
+                return Percentile.getValue(session, array, type.getValueType(), orderByList, arg,
+                        aggregateType == AggregateType.PERCENTILE_CONT);
+            } else {
+                throw DbException.getInvalidValueException(aggregateType == AggregateType.PERCENTILE_CONT ?
+                        "PERCENTILE_CONT argument" : "PERCENTILE_DISC argument", arg);
+            }
         }
         case MEDIAN: {
             Value[] array = ((AggregateDataCollecting) data).getArray();
             if (array == null) {
                 return ValueNull.INSTANCE;
             }
-            return AggregateMedian.median(session.getDatabase(), array, dataType);
+            return Percentile.getValue(session, array, type.getValueType(), orderByList, Percentile.HALF, true);
         }
         case MODE:
-            if (orderByList != null) {
-                return ((AggregateDataMode) data).getOrderedValue(session.getDatabase(), dataType,
-                        (orderByList.get(0).sortType & SortOrder.DESCENDING) != 0);
+            return getMode(session, data);
+        case JSON_ARRAYAGG: {
+            Value[] array = ((AggregateDataCollecting) data).getArray();
+            if (array == null) {
+                return ValueNull.INSTANCE;
             }
-            //$FALL-THROUGH$
+            if (orderByList != null) {
+                sortWithOrderBy(array);
+            }
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            baos.write('[');
+            for (Value v : array) {
+                if (orderByList != null) {
+                    v = ((ValueRow) v).getList()[0];
+                }
+                JsonConstructorUtils.jsonArrayAppend(baos, v != ValueNull.INSTANCE ? v : ValueJson.NULL, flags);
+            }
+            baos.write(']');
+            return ValueJson.getInternal(baos.toByteArray());
+        }
+        case JSON_OBJECTAGG: {
+            Value[] array = ((AggregateDataCollecting) data).getArray();
+            if (array == null) {
+                return ValueNull.INSTANCE;
+            }
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            baos.write('{');
+            for (Value v : array) {
+                Value[] row = ((ValueRow) v).getList();
+                String key = row[0].getString();
+                if (key == null) {
+                    throw DbException.getInvalidValueException("JSON_OBJECTAGG key", "NULL");
+                }
+                Value value = row[1];
+                if (value == ValueNull.INSTANCE) {
+                    if ((flags & JsonConstructorUtils.JSON_ABSENT_ON_NULL) != 0) {
+                        continue;
+                    }
+                    value = ValueJson.NULL;
+                }
+                JsonConstructorUtils.jsonObjectAppend(baos, key, value);
+            }
+            return JsonConstructorUtils.jsonObjectFinish(baos, flags);
+        }
         default:
             // Avoid compiler warning
         }
-        return data.getValue(session.getDatabase(), dataType);
+        return data.getValue(session);
     }
 
-    @Override
-    public int getType() {
-        return dataType;
+    private Value getHypotheticalSet(SessionLocal session, AggregateData data) {
+        AggregateDataCollecting collectingData = (AggregateDataCollecting) data;
+        Value arg = collectingData.getSharedArgument();
+        if (arg == null) {
+            switch (aggregateType) {
+            case RANK:
+            case DENSE_RANK:
+                return ValueInteger.get(1);
+            case PERCENT_RANK:
+                return ValueDouble.ZERO;
+            case CUME_DIST:
+                return ValueDouble.ONE;
+            default:
+                throw DbException.getUnsupportedException("aggregateType=" + aggregateType);
+            }
+        }
+        collectingData.add(session, arg);
+        Value[] array = collectingData.getArray();
+        Comparator<Value> sort = orderBySort.getRowValueComparator();
+        Arrays.sort(array, sort);
+        return aggregateType == AggregateType.CUME_DIST ? getCumeDist(array, arg, sort) : getRank(array, arg, sort);
+    }
+
+    private Value getRank(Value[] ordered, Value arg, Comparator<Value> sort) {
+        int size = ordered.length;
+        int number = 0;
+        for (int i = 0; i < size; i++) {
+            Value row = ordered[i];
+            if (i == 0) {
+                number = 1;
+            } else if (sort.compare(ordered[i - 1], row) != 0) {
+                if (aggregateType == AggregateType.DENSE_RANK) {
+                    number++;
+                } else {
+                    number = i + 1;
+                }
+            }
+            Value v;
+            if (aggregateType == AggregateType.PERCENT_RANK) {
+                int nm = number - 1;
+                v = nm == 0 ? ValueDouble.ZERO : ValueDouble.get((double) nm / (size - 1));
+            } else {
+                v = ValueBigint.get(number);
+            }
+            if (sort.compare(row, arg) == 0) {
+                return v;
+            }
+        }
+        throw DbException.getInternalError();
+    }
+
+    private static Value getCumeDist(Value[] ordered, Value arg, Comparator<Value> sort) {
+        int size = ordered.length;
+        for (int start = 0; start < size;) {
+            Value array = ordered[start];
+            int end = start + 1;
+            while (end < size && sort.compare(array, ordered[end]) == 0) {
+                end++;
+            }
+            ValueDouble v = ValueDouble.get((double) end / size);
+            for (int i = start; i < end; i++) {
+                if (sort.compare(ordered[i], arg) == 0) {
+                    return v;
+                }
+            }
+            start = end;
+        }
+        throw DbException.getInternalError();
+    }
+
+    private Value getListagg(SessionLocal session, AggregateData data) {
+        AggregateDataCollecting collectingData = (AggregateDataCollecting) data;
+        Value[] array = collectingData.getArray();
+        if (array == null) {
+            return ValueNull.INSTANCE;
+        }
+        if (array.length == 1) {
+            Value v = array[0];
+            if (orderByList != null) {
+                v = ((ValueRow) v).getList()[0];
+            }
+            return v.convertTo(Value.VARCHAR, session);
+        }
+        if (orderByList != null || distinct) {
+            sortWithOrderBy(array);
+        }
+        ListaggArguments arguments = (ListaggArguments) extraArguments;
+        String separator = arguments.getEffectiveSeparator();
+        return ValueVarchar
+                .get((arguments.getOnOverflowTruncate()
+                        ? getListaggTruncate(session, array, separator, arguments.getEffectiveFilter(),
+                                arguments.isWithoutCount())
+                        : getListaggError(session, array, separator)).toString(), session);
+    }
+
+    private StringBuilder getListaggError(SessionLocal session, Value[] array, String separator) {
+        StringBuilder builder = new StringBuilder(getListaggItem(array[0]));
+        for (int i = 1, count = array.length; i < count; i++) {
+            builder.append(separator).append(getListaggItem(array[i]));
+            if (builder.length() > Constants.MAX_STRING_LENGTH) {
+                throw DbException.getValueTooLongException("CHARACTER VARYING", builder.substring(0, 81), -1L);
+            }
+        }
+        return builder;
+    }
+
+    private StringBuilder getListaggTruncate(SessionLocal session, Value[] array, String separator, String filter,
+            boolean withoutCount) {
+        int count = array.length;
+        String[] strings = new String[count];
+        String s = getListaggItem(array[0]);
+        strings[0] = s;
+        StringBuilder builder = new StringBuilder(s);
+        loop: for (int i = 1; i < count; i++) {
+            builder.append(separator).append(strings[i] = s = getListaggItem(array[i]));
+            int length = builder.length();
+            if (length > Constants.MAX_STRING_LENGTH) {
+                for (; i > 0; i--) {
+                    length -= strings[i].length();
+                    builder.setLength(length);
+                    builder.append(filter);
+                    if (!withoutCount) {
+                        builder.append('(').append(count - i).append(')');
+                    }
+                    if (builder.length() <= Constants.MAX_STRING_LENGTH) {
+                        break loop;
+                    }
+                    length -= separator.length();
+                }
+                builder.setLength(0);
+                builder.append(filter).append('(').append(count).append(')');
+                break;
+            }
+        }
+        return builder;
+    }
+
+    private String getListaggItem(Value v) {
+        if (orderByList != null) {
+            v = ((ValueRow) v).getList()[0];
+        }
+        return v.getString();
+    }
+
+    private Value getHistogram(SessionLocal session, AggregateData data) {
+        TreeMap<Value, LongDataCounter> distinctValues = ((AggregateDataDistinctWithCounts) data).getValues();
+        TypeInfo rowType = (TypeInfo) type.getExtTypeInfo();
+        if (distinctValues == null) {
+            return ValueArray.get(rowType, Value.EMPTY_VALUES, session);
+        }
+        ValueRow[] values = new ValueRow[distinctValues.size()];
+        int i = 0;
+        for (Entry<Value, LongDataCounter> entry : distinctValues.entrySet()) {
+            LongDataCounter d = entry.getValue();
+            values[i] = ValueRow.get(rowType, new Value[] { entry.getKey(), ValueBigint.get(d.count) });
+            i++;
+        }
+        Database db = session.getDatabase();
+        CompareMode compareMode = db.getCompareMode();
+        Arrays.sort(values, (v1, v2) -> v1.getList()[0].compareTo(v2.getList()[0], session, compareMode));
+        return ValueArray.get(rowType, values, session);
+    }
+
+    private Value getMode(SessionLocal session, AggregateData data) {
+        Value v = ValueNull.INSTANCE;
+        TreeMap<Value, LongDataCounter> distinctValues = ((AggregateDataDistinctWithCounts) data).getValues();
+        if (distinctValues == null) {
+            return v;
+        }
+        long count = 0L;
+        if (orderByList != null) {
+            boolean desc = (orderByList.get(0).sortType & SortOrder.DESCENDING) != 0;
+            for (Entry<Value, LongDataCounter> entry : distinctValues.entrySet()) {
+                long c = entry.getValue().count;
+                if (c > count) {
+                    v = entry.getKey();
+                    count = c;
+                } else if (c == count) {
+                    Value v2 = entry.getKey();
+                    int cmp = session.compareTypeSafe(v, v2);
+                    if (desc) {
+                        if (cmp >= 0) {
+                            continue;
+                        }
+                    } else if (cmp <= 0) {
+                        continue;
+                    }
+                    v = v2;
+                }
+            }
+        } else {
+            for (Entry<Value, LongDataCounter> entry : distinctValues.entrySet()) {
+                long c = entry.getValue().count;
+                if (c > count) {
+                    v = entry.getKey();
+                    count = c;
+                }
+            }
+        }
+        return v;
     }
 
     @Override
     public void mapColumnsAnalysis(ColumnResolver resolver, int level, int innerState) {
-        if (on != null) {
-            on.mapColumns(resolver, level, innerState);
-        }
         if (orderByList != null) {
-            for (SelectOrderBy o : orderByList) {
+            for (QueryOrderBy o : orderByList) {
                 o.expression.mapColumns(resolver, level, innerState);
             }
-        }
-        if (groupConcatSeparator != null) {
-            groupConcatSeparator.mapColumns(resolver, level, innerState);
         }
         super.mapColumnsAnalysis(resolver, level, innerState);
     }
 
     @Override
-    public Expression optimize(Session session) {
+    public Expression optimize(SessionLocal session) {
         super.optimize(session);
-        if (on != null) {
-            on = on.optimize(session);
-            dataType = on.getType();
-            scale = on.getScale();
-            precision = on.getPrecision();
-            displaySize = on.getDisplaySize();
+        if (args.length == 1) {
+            type = args[0].getType();
         }
         if (orderByList != null) {
-            for (SelectOrderBy o : orderByList) {
-                o.expression = o.expression.optimize(session);
+            int offset;
+            switch (aggregateType) {
+            case ARRAY_AGG:
+            case LISTAGG:
+            case JSON_ARRAYAGG:
+                offset = 1;
+                break;
+            default:
+                offset = 0;
             }
-            orderBySort = createOrder(session, orderByList, 1);
+            for (Iterator<QueryOrderBy> i = orderByList.iterator(); i.hasNext();) {
+                QueryOrderBy o = i.next();
+                Expression e = o.expression.optimize(session);
+                if (offset != 0 && e.isConstant()) {
+                    i.remove();
+                } else {
+                    o.expression = e;
+                }
+            }
+            if (orderByList.isEmpty()) {
+                orderByList = null;
+            } else {
+                orderBySort = createOrder(session, orderByList, offset);
+            }
         }
-        if (groupConcatSeparator != null) {
-            groupConcatSeparator = groupConcatSeparator.optimize(session);
-        }
-        switch (type) {
-        case GROUP_CONCAT:
-            dataType = Value.STRING;
-            scale = 0;
-            precision = displaySize = Integer.MAX_VALUE;
+        switch (aggregateType) {
+        case LISTAGG:
+            type = TypeInfo.TYPE_VARCHAR;
             break;
         case COUNT_ALL:
+            type = TypeInfo.TYPE_BIGINT;
+            break;
         case COUNT:
-            dataType = Value.LONG;
-            scale = 0;
-            precision = ValueLong.PRECISION;
-            displaySize = ValueLong.DISPLAY_SIZE;
+            if (args[0].isConstant()) {
+                if (args[0].getValue(session) == ValueNull.INSTANCE) {
+                    return ValueExpression.get(ValueBigint.get(0L));
+                }
+                if (!distinct) {
+                    Aggregate aggregate = new Aggregate(AggregateType.COUNT_ALL, new Expression[0], select, false);
+                    aggregate.setFilterCondition(filterCondition);
+                    aggregate.setOverCondition(over);
+                    return aggregate.optimize(session);
+                }
+            }
+            type = TypeInfo.TYPE_BIGINT;
             break;
-        case SELECTIVITY:
-            dataType = Value.INT;
-            scale = 0;
-            precision = ValueInt.PRECISION;
-            displaySize = ValueInt.DISPLAY_SIZE;
+        case HISTOGRAM: {
+            LinkedHashMap<String, TypeInfo> fields = new LinkedHashMap<>(4);
+            fields.put("VALUE", type);
+            fields.put("COUNT", TypeInfo.TYPE_BIGINT);
+            type = TypeInfo.getTypeInfo(Value.ARRAY, -1, 0,
+                    TypeInfo.getTypeInfo(Value.ROW, -1, -1, new ExtTypeInfoRow(fields)));
             break;
-        case HISTOGRAM:
-            dataType = Value.ARRAY;
-            scale = 0;
-            precision = displaySize = Integer.MAX_VALUE;
-            break;
-        case SUM:
+        }
+        case SUM: {
+            int dataType = type.getValueType();
             if (dataType == Value.BOOLEAN) {
                 // example: sum(id > 3) (count the rows)
-                dataType = Value.LONG;
+                type = TypeInfo.TYPE_BIGINT;
             } else if (!DataType.supportsAdd(dataType)) {
-                throw DbException.get(ErrorCode.SUM_OR_AVG_ON_WRONG_DATATYPE_1, getSQL());
+                throw DbException.get(ErrorCode.SUM_OR_AVG_ON_WRONG_DATATYPE_1, getTraceSQL());
             } else {
-                dataType = DataType.getAddProofType(dataType);
+                type = TypeInfo.getTypeInfo(DataType.getAddProofType(dataType));
             }
             break;
+        }
         case AVG:
-            if (!DataType.supportsAdd(dataType)) {
-                throw DbException.get(ErrorCode.SUM_OR_AVG_ON_WRONG_DATATYPE_1, getSQL());
+            if (!DataType.supportsAdd(type.getValueType())) {
+                throw DbException.get(ErrorCode.SUM_OR_AVG_ON_WRONG_DATATYPE_1, getTraceSQL());
             }
             break;
         case MIN:
         case MAX:
+            break;
+        case RANK:
+        case DENSE_RANK:
+            type = TypeInfo.TYPE_BIGINT;
+            break;
+        case PERCENT_RANK:
+        case CUME_DIST:
+            type = TypeInfo.TYPE_DOUBLE;
+            break;
+        case PERCENTILE_CONT:
+            type = orderByList.get(0).expression.getType();
+            //$FALL-THROUGH$
         case MEDIAN:
+            switch (type.getValueType()) {
+            case Value.TINYINT:
+            case Value.SMALLINT:
+            case Value.INTEGER:
+            case Value.BIGINT:
+            case Value.NUMERIC:
+            case Value.REAL:
+            case Value.DOUBLE:
+            case Value.DECFLOAT:
+                type = TypeInfo.TYPE_NUMERIC_FLOATING_POINT;
+                break;
+            }
+            break;
+        case PERCENTILE_DISC:
         case MODE:
+            type = orderByList.get(0).expression.getType();
             break;
         case STDDEV_POP:
         case STDDEV_SAMP:
         case VAR_POP:
         case VAR_SAMP:
-            dataType = Value.DOUBLE;
-            precision = ValueDouble.PRECISION;
-            displaySize = ValueDouble.DISPLAY_SIZE;
-            scale = 0;
+            type = TypeInfo.TYPE_DOUBLE;
             break;
-        case BOOL_AND:
-        case BOOL_OR:
-            dataType = Value.BOOLEAN;
-            precision = ValueBoolean.PRECISION;
-            displaySize = ValueBoolean.DISPLAY_SIZE;
-            scale = 0;
+        case EVERY:
+        case ANY:
+            type = TypeInfo.TYPE_BOOLEAN;
             break;
-        case BIT_AND:
-        case BIT_OR:
-            if (!DataType.supportsAdd(dataType)) {
-                throw DbException.get(ErrorCode.SUM_OR_AVG_ON_WRONG_DATATYPE_1, getSQL());
-            }
+        case BIT_AND_AGG:
+        case BIT_OR_AGG:
+        case BIT_XOR_AGG:
+        case BIT_NAND_AGG:
+        case BIT_NOR_AGG:
+        case BIT_XNOR_AGG:
+            BitFunction.checkArgType(args[0]);
             break;
         case ARRAY_AGG:
-            dataType = Value.ARRAY;
-            scale = 0;
-            precision = displaySize = Integer.MAX_VALUE;
+            type = TypeInfo.getTypeInfo(Value.ARRAY, -1, 0, args[0].getType());
             break;
         case ENVELOPE:
-            dataType = Value.GEOMETRY;
-            scale = 0;
-            precision = displaySize = Integer.MAX_VALUE;
+            type = TypeInfo.TYPE_GEOMETRY;
+            break;
+        case JSON_OBJECTAGG:
+        case JSON_ARRAYAGG:
+            type = TypeInfo.TYPE_JSON;
             break;
         default:
-            DbException.throwInternalError("type=" + type);
+            throw DbException.getInternalError("type=" + aggregateType);
         }
         return this;
     }
 
     @Override
     public void setEvaluatable(TableFilter tableFilter, boolean b) {
-        if (on != null) {
-            on.setEvaluatable(tableFilter, b);
-        }
         if (orderByList != null) {
-            for (SelectOrderBy o : orderByList) {
+            for (QueryOrderBy o : orderByList) {
                 o.expression.setEvaluatable(tableFilter, b);
             }
-        }
-        if (groupConcatSeparator != null) {
-            groupConcatSeparator.setEvaluatable(tableFilter, b);
         }
         super.setEvaluatable(tableFilter, b);
     }
 
     @Override
-    public int getScale() {
-        return scale;
-    }
-
-    @Override
-    public long getPrecision() {
-        return precision;
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return displaySize;
-    }
-
-    private String getSQLGroupConcat() {
-        StringBuilder buff = new StringBuilder("GROUP_CONCAT(");
-        if (distinct) {
-            buff.append("DISTINCT ");
-        }
-        buff.append(on.getSQL());
-        Window.appendOrderBy(buff, orderByList);
-        if (groupConcatSeparator != null) {
-            buff.append(" SEPARATOR ").append(groupConcatSeparator.getSQL());
-        }
-        buff.append(')');
-        return appendTailConditions(buff).toString();
-    }
-
-    private String getSQLArrayAggregate() {
-        StringBuilder buff = new StringBuilder("ARRAY_AGG(");
-        if (distinct) {
-            buff.append("DISTINCT ");
-        }
-        buff.append(on.getSQL());
-        Window.appendOrderBy(buff, orderByList);
-        buff.append(')');
-        return appendTailConditions(buff).toString();
-    }
-
-    @Override
-    public String getSQL() {
+    public StringBuilder getUnenclosedSQL(StringBuilder builder, int sqlFlags) {
         String text;
-        switch (type) {
-        case GROUP_CONCAT:
-            return getSQLGroupConcat();
+        switch (aggregateType) {
         case COUNT_ALL:
-            return appendTailConditions(new StringBuilder().append("COUNT(*)")).toString();
+            return appendTailConditions(builder.append("COUNT(*)"), sqlFlags, false);
         case COUNT:
             text = "COUNT";
-            break;
-        case SELECTIVITY:
-            text = "SELECTIVITY";
             break;
         case HISTOGRAM:
             text = "HISTOGRAM";
@@ -725,44 +947,144 @@ public class Aggregate extends AbstractAggregate {
         case VAR_SAMP:
             text = "VAR_SAMP";
             break;
-        case BOOL_AND:
-            text = "BOOL_AND";
+        case EVERY:
+            text = "EVERY";
             break;
-        case BOOL_OR:
-            text = "BOOL_OR";
+        case ANY:
+            text = "ANY";
             break;
-        case BIT_AND:
-            text = "BIT_AND";
+        case BIT_AND_AGG:
+            text = "BIT_AND_AGG";
             break;
-        case BIT_OR:
-            text = "BIT_OR";
+        case BIT_OR_AGG:
+            text = "BIT_OR_AGG";
+            break;
+        case BIT_XOR_AGG:
+            text = "BIT_XOR_AGG";
+            break;
+        case BIT_NAND_AGG:
+            text = "BIT_NAND_AGG";
+            break;
+        case BIT_NOR_AGG:
+            text = "BIT_NOR_AGG";
+            break;
+        case BIT_XNOR_AGG:
+            text = "BIT_XNOR_AGG";
+            break;
+        case RANK:
+            text = "RANK";
+            break;
+        case DENSE_RANK:
+            text = "DENSE_RANK";
+            break;
+        case PERCENT_RANK:
+            text = "PERCENT_RANK";
+            break;
+        case CUME_DIST:
+            text = "CUME_DIST";
+            break;
+        case PERCENTILE_CONT:
+            text = "PERCENTILE_CONT";
+            break;
+        case PERCENTILE_DISC:
+            text = "PERCENTILE_DISC";
             break;
         case MEDIAN:
             text = "MEDIAN";
             break;
+        case LISTAGG:
+            return getSQLListagg(builder, sqlFlags);
         case ARRAY_AGG:
-            return getSQLArrayAggregate();
+            return getSQLArrayAggregate(builder, sqlFlags);
         case MODE:
             text = "MODE";
             break;
         case ENVELOPE:
             text = "ENVELOPE";
             break;
+        case JSON_OBJECTAGG:
+            return getSQLJsonObjectAggregate(builder, sqlFlags);
+        case JSON_ARRAYAGG:
+            return getSQLJsonArrayAggregate(builder, sqlFlags);
         default:
-            throw DbException.throwInternalError("type=" + type);
+            throw DbException.getInternalError("type=" + aggregateType);
         }
-        StringBuilder builder = new StringBuilder().append(text);
+        builder.append(text);
         if (distinct) {
-            builder.append("(DISTINCT ").append(on.getSQL()).append(')');
+            builder.append("(DISTINCT ");
         } else {
-            builder.append(StringUtils.enclose(on.getSQL()));
+            builder.append('(');
         }
-        return appendTailConditions(builder).toString();
+        writeExpressions(builder, args, sqlFlags).append(')');
+        if (orderByList != null) {
+            builder.append(" WITHIN GROUP (");
+            Window.appendOrderBy(builder, orderByList, sqlFlags, false);
+            builder.append(')');
+        }
+        return appendTailConditions(builder, sqlFlags, false);
+    }
+
+    private StringBuilder getSQLArrayAggregate(StringBuilder builder, int sqlFlags) {
+        builder.append("ARRAY_AGG(");
+        if (distinct) {
+            builder.append("DISTINCT ");
+        }
+        args[0].getUnenclosedSQL(builder, sqlFlags);
+        Window.appendOrderBy(builder, orderByList, sqlFlags, false);
+        builder.append(')');
+        return appendTailConditions(builder, sqlFlags, false);
+    }
+
+    private StringBuilder getSQLListagg(StringBuilder builder, int sqlFlags) {
+        builder.append("LISTAGG(");
+        if (distinct) {
+            builder.append("DISTINCT ");
+        }
+        args[0].getUnenclosedSQL(builder, sqlFlags);
+        ListaggArguments arguments = (ListaggArguments) extraArguments;
+        String s = arguments.getSeparator();
+        if (s != null) {
+            StringUtils.quoteStringSQL(builder.append(", "), s);
+        }
+        if (arguments.getOnOverflowTruncate()) {
+            builder.append(" ON OVERFLOW TRUNCATE ");
+            s = arguments.getFilter();
+            if (s != null) {
+                StringUtils.quoteStringSQL(builder, s).append(' ');
+            }
+            builder.append(arguments.isWithoutCount() ? "WITHOUT" : "WITH").append(" COUNT");
+        }
+        builder.append(')');
+        builder.append(" WITHIN GROUP (");
+        Window.appendOrderBy(builder, orderByList, sqlFlags, true);
+        builder.append(')');
+        return appendTailConditions(builder, sqlFlags, false);
+    }
+
+    private StringBuilder getSQLJsonObjectAggregate(StringBuilder builder, int sqlFlags) {
+        builder.append("JSON_OBJECTAGG(");
+        args[0].getUnenclosedSQL(builder, sqlFlags).append(": ");
+        args[1].getUnenclosedSQL(builder, sqlFlags);
+        JsonConstructorFunction.getJsonFunctionFlagsSQL(builder, flags, false).append(')');
+        return appendTailConditions(builder, sqlFlags, false);
+    }
+
+    private StringBuilder getSQLJsonArrayAggregate(StringBuilder builder, int sqlFlags) {
+        builder.append("JSON_ARRAYAGG(");
+        if (distinct) {
+            builder.append("DISTINCT ");
+        }
+        args[0].getUnenclosedSQL(builder, sqlFlags);
+        JsonConstructorFunction.getJsonFunctionFlagsSQL(builder, flags, true);
+        Window.appendOrderBy(builder, orderByList, sqlFlags, false);
+        builder.append(')');
+        return appendTailConditions(builder, sqlFlags, false);
     }
 
     private Index getMinMaxColumnIndex() {
-        if (on instanceof ExpressionColumn) {
-            ExpressionColumn col = (ExpressionColumn) on;
+        Expression arg = args[0];
+        if (arg instanceof ExpressionColumn) {
+            ExpressionColumn col = (ExpressionColumn) arg;
             Column column = col.getColumn();
             TableFilter filter = col.getTableFilter();
             if (filter != null) {
@@ -781,38 +1103,41 @@ public class Aggregate extends AbstractAggregate {
         if (filterCondition != null && !filterCondition.isEverything(visitor)) {
             return false;
         }
-        if (visitor.getType() == ExpressionVisitor.OPTIMIZABLE_MIN_MAX_COUNT_ALL) {
-            switch (type) {
+        if (visitor.getType() == ExpressionVisitor.OPTIMIZABLE_AGGREGATE) {
+            switch (aggregateType) {
             case COUNT:
-                if (!distinct && on.getNullable() == Column.NOT_NULLABLE) {
-                    return visitor.getTable().canGetRowCount();
+                if (!distinct && args[0].getNullable() == Column.NOT_NULLABLE) {
+                    return visitor.getTable().canGetRowCount(select.getSession());
                 }
                 return false;
             case COUNT_ALL:
-                return visitor.getTable().canGetRowCount();
+                return visitor.getTable().canGetRowCount(select.getSession());
             case MIN:
             case MAX:
                 Index index = getMinMaxColumnIndex();
                 return index != null;
+            case PERCENTILE_CONT:
+            case PERCENTILE_DISC:
+                return args[0].isConstant() && Percentile.getColumnIndex(select.getSession().getDatabase(),
+                        orderByList.get(0).expression) != null;
             case MEDIAN:
                 if (distinct) {
                     return false;
                 }
-                return AggregateMedian.getMedianColumnIndex(on) != null;
+                return Percentile.getColumnIndex(select.getSession().getDatabase(), args[0]) != null;
             case ENVELOPE:
-                return AggregateDataEnvelope.getGeometryColumnIndex(on) != null;
+                return AggregateDataEnvelope.getGeometryColumnIndex(args[0]) != null;
             default:
                 return false;
             }
         }
-        if (on != null && !on.isEverything(visitor)) {
-            return false;
-        }
-        if (groupConcatSeparator != null && !groupConcatSeparator.isEverything(visitor)) {
-            return false;
+        for (Expression arg : args) {
+            if (!arg.isEverything(visitor)) {
+                return false;
+            }
         }
         if (orderByList != null) {
-            for (SelectOrderBy o : orderByList) {
+            for (QueryOrderBy o : orderByList) {
                 if (!o.expression.isEverything(visitor)) {
                     return false;
                 }
@@ -824,13 +1149,35 @@ public class Aggregate extends AbstractAggregate {
     @Override
     public int getCost() {
         int cost = 1;
-        if (on != null) {
-            cost += on.getCost();
+        for (Expression arg : args) {
+            cost += arg.getCost();
+        }
+        if (orderByList != null) {
+            for (QueryOrderBy o : orderByList) {
+                cost += o.expression.getCost();
+            }
         }
         if (filterCondition != null) {
             cost += filterCondition.getCost();
         }
         return cost;
+    }
+
+    /**
+     * Returns the select statement.
+     * @return the select statement
+     */
+    public Select getSelect() {
+        return select;
+    }
+
+    /**
+     * Returns if distinct is used.
+     *
+     * @return if distinct is used
+     */
+    public boolean isDistinct() {
+        return distinct;
     }
 
 }

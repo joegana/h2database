@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.util;
@@ -328,7 +328,8 @@ public class IntervalUtils {
         return ValueInterval.from(qualifier, negative, leading, remaining);
     }
 
-    static ValueInterval parseInterval2(IntervalQualifier qualifier, String s, char ch, int max, boolean negative) {
+    private static ValueInterval parseInterval2(IntervalQualifier qualifier, String s,
+            char ch, int max, boolean negative) {
         long leading;
         long remaining;
         int dash = s.indexOf(ch, 1);
@@ -383,8 +384,11 @@ public class IntervalUtils {
     }
 
     /**
-     * Formats interval as a string.
+     * Formats interval as a string and appends it to a specified string
+     * builder.
      *
+     * @param buff
+     *            string builder to append to
      * @param qualifier
      *            qualifier of the interval
      * @param negative
@@ -393,12 +397,11 @@ public class IntervalUtils {
      *            the value of leading field
      * @param remaining
      *            the value of all remaining fields
-     * @return string representation of the specified interval
+     * @return the specified string builder
      */
-    public static String intervalToString(IntervalQualifier qualifier, boolean negative, long leading, long remaining)
-    {
-        StringBuilder buff = new StringBuilder().append("INTERVAL ");
-        buff.append('\'');
+    public static StringBuilder appendInterval(StringBuilder buff, IntervalQualifier qualifier, boolean negative,
+            long leading, long remaining) {
+        buff.append("INTERVAL '");
         if (negative) {
             buff.append('-');
         }
@@ -411,63 +414,51 @@ public class IntervalUtils {
             buff.append(leading);
             break;
         case SECOND:
-            buff.append(leading);
-            appendNanos(buff, remaining);
+            DateTimeUtils.appendNanos(buff.append(leading), (int) remaining);
             break;
         case YEAR_TO_MONTH:
             buff.append(leading).append('-').append(remaining);
             break;
         case DAY_TO_HOUR:
             buff.append(leading).append(' ');
-            StringUtils.appendZeroPadded(buff, 2, remaining);
+            StringUtils.appendTwoDigits(buff, (int) remaining);
             break;
-        case DAY_TO_MINUTE:
+        case DAY_TO_MINUTE: {
             buff.append(leading).append(' ');
-            StringUtils.appendZeroPadded(buff, 2, remaining / 60);
-            buff.append(':');
-            StringUtils.appendZeroPadded(buff, 2, remaining % 60);
+            int r = (int) remaining;
+            StringUtils.appendTwoDigits(buff, r / 60).append(':');
+            StringUtils.appendTwoDigits(buff, r % 60);
             break;
+        }
         case DAY_TO_SECOND: {
             long nanos = remaining % NANOS_PER_MINUTE;
-            remaining /= NANOS_PER_MINUTE;
+            int r = (int) (remaining / NANOS_PER_MINUTE);
             buff.append(leading).append(' ');
-            StringUtils.appendZeroPadded(buff, 2, remaining / 60);
-            buff.append(':');
-            StringUtils.appendZeroPadded(buff, 2, remaining % 60);
-            buff.append(':');
-            appendSecondsWithNanos(buff, nanos);
+            StringUtils.appendTwoDigits(buff, r / 60).append(':');
+            StringUtils.appendTwoDigits(buff, r % 60).append(':');
+            StringUtils.appendTwoDigits(buff, (int) (nanos / NANOS_PER_SECOND));
+            DateTimeUtils.appendNanos(buff, (int) (nanos % NANOS_PER_SECOND));
             break;
         }
         case HOUR_TO_MINUTE:
             buff.append(leading).append(':');
-            StringUtils.appendZeroPadded(buff, 2, remaining);
+            StringUtils.appendTwoDigits(buff, (int) remaining);
             break;
-        case HOUR_TO_SECOND:
+        case HOUR_TO_SECOND: {
             buff.append(leading).append(':');
-            StringUtils.appendZeroPadded(buff, 2, remaining / NANOS_PER_MINUTE);
-            buff.append(':');
-            appendSecondsWithNanos(buff, remaining % NANOS_PER_MINUTE);
+            StringUtils.appendTwoDigits(buff, (int) (remaining / NANOS_PER_MINUTE)).append(':');
+            long s =  remaining % NANOS_PER_MINUTE;
+            StringUtils.appendTwoDigits(buff, (int) (s / NANOS_PER_SECOND));
+            DateTimeUtils.appendNanos(buff, (int) (s % NANOS_PER_SECOND));
             break;
+        }
         case MINUTE_TO_SECOND:
             buff.append(leading).append(':');
-            appendSecondsWithNanos(buff, remaining);
+            StringUtils.appendTwoDigits(buff, (int) (remaining / NANOS_PER_SECOND));
+            DateTimeUtils.appendNanos(buff, (int) (remaining % NANOS_PER_SECOND));
             break;
         }
-        buff.append("' ").append(qualifier);
-        return buff.toString();
-    }
-
-    private static void appendSecondsWithNanos(StringBuilder buff, long nanos) {
-        StringUtils.appendZeroPadded(buff, 2, nanos / NANOS_PER_SECOND);
-        appendNanos(buff, nanos % NANOS_PER_SECOND);
-    }
-
-    private static void appendNanos(StringBuilder buff, long nanos) {
-        if (nanos > 0) {
-            buff.append('.');
-            StringUtils.appendZeroPadded(buff, 9, nanos);
-            DateTimeUtils.stripTrailingZeroes(buff);
-        }
+        return buff.append("' ").append(qualifier);
     }
 
     /**
@@ -664,6 +655,8 @@ public class IntervalUtils {
     }
 
     /**
+     * Returns years value of interval, if any.
+     *
      * @param qualifier
      *            qualifier
      * @param negative
@@ -687,6 +680,8 @@ public class IntervalUtils {
     }
 
     /**
+     * Returns months value of interval, if any.
+     *
      * @param qualifier
      *            qualifier
      * @param negative
@@ -697,8 +692,8 @@ public class IntervalUtils {
      *            values of all remaining fields
      * @return months, or 0
      */
-    public static long monthsFromInterval(IntervalQualifier qualifier, boolean negative, long leading, long remaining)
-    {
+    public static long monthsFromInterval(IntervalQualifier qualifier, boolean negative, long leading, //
+            long remaining) {
         long v;
         if (qualifier == IntervalQualifier.MONTH) {
             v = leading;
@@ -714,6 +709,8 @@ public class IntervalUtils {
     }
 
     /**
+     * Returns days value of interval, if any.
+     *
      * @param qualifier
      *            qualifier
      * @param negative
@@ -722,7 +719,7 @@ public class IntervalUtils {
      *            value of leading field
      * @param remaining
      *            values of all remaining fields
-     * @return months, or 0
+     * @return days, or 0
      */
     public static long daysFromInterval(IntervalQualifier qualifier, boolean negative, long leading, long remaining) {
         switch (qualifier) {
@@ -741,6 +738,8 @@ public class IntervalUtils {
     }
 
     /**
+     * Returns hours value of interval, if any.
+     *
      * @param qualifier
      *            qualifier
      * @param negative
@@ -778,6 +777,8 @@ public class IntervalUtils {
     }
 
     /**
+     * Returns minutes value of interval, if any.
+     *
      * @param qualifier
      *            qualifier
      * @param negative
@@ -818,6 +819,8 @@ public class IntervalUtils {
     }
 
     /**
+     * Returns nanoseconds value of interval, if any.
+     *
      * @param qualifier
      *            qualifier
      * @param negative

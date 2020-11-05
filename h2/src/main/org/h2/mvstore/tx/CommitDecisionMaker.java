@@ -1,11 +1,12 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.mvstore.tx;
 
 import org.h2.mvstore.MVMap;
+import org.h2.value.VersionedValue;
 
 /**
  * Class CommitDecisionMaker makes a decision during post-commit processing
@@ -14,7 +15,7 @@ import org.h2.mvstore.MVMap;
  *
  * @author <a href='mailto:andrei.tokar@gmail.com'>Andrei Tokar</a>
  */
-final class CommitDecisionMaker extends MVMap.DecisionMaker<VersionedValue> {
+final class CommitDecisionMaker<V> extends MVMap.DecisionMaker<VersionedValue<V>> {
     private long undoKey;
     private MVMap.Decision decision;
 
@@ -24,7 +25,7 @@ final class CommitDecisionMaker extends MVMap.DecisionMaker<VersionedValue> {
     }
 
     @Override
-    public MVMap.Decision decide(VersionedValue existingValue, VersionedValue providedValue) {
+    public MVMap.Decision decide(VersionedValue<V> existingValue, VersionedValue<V> providedValue) {
         assert decision == null;
         if (existingValue == null ||
             // map entry was treated as already committed, and then
@@ -36,7 +37,7 @@ final class CommitDecisionMaker extends MVMap.DecisionMaker<VersionedValue> {
             // see TxDecisionMaker.decide()
 
             decision = MVMap.Decision.ABORT;
-        } else /* this is final undo log entry for this key */ if (existingValue.value == null) {
+        } else /* this is final undo log entry for this key */ if (existingValue.getCurrentValue() == null) {
             decision = MVMap.Decision.REMOVE;
         } else {
             decision = MVMap.Decision.PUT;
@@ -46,10 +47,10 @@ final class CommitDecisionMaker extends MVMap.DecisionMaker<VersionedValue> {
 
     @SuppressWarnings("unchecked")
     @Override
-    public VersionedValue selectValue(VersionedValue existingValue, VersionedValue providedValue) {
+    public <T extends VersionedValue<V>> T selectValue(T existingValue, T providedValue) {
         assert decision == MVMap.Decision.PUT;
         assert existingValue != null;
-        return VersionedValue.getInstance(existingValue.value);
+        return (T) VersionedValueCommitted.getInstance(existingValue.getCurrentValue());
     }
 
     @Override

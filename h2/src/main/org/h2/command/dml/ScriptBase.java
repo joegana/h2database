@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.dml;
@@ -11,20 +11,19 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import org.h2.api.ErrorCode;
-import org.h2.api.JavaObjectSerializer;
 import org.h2.command.Prepared;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.engine.SysProperties;
 import org.h2.expression.Expression;
 import org.h2.message.DbException;
+import org.h2.pagestore.db.LobStorageBackend;
 import org.h2.security.SHA256;
 import org.h2.store.DataHandler;
 import org.h2.store.FileStore;
 import org.h2.store.FileStoreInputStream;
 import org.h2.store.FileStoreOutputStream;
-import org.h2.store.LobStorageBackend;
 import org.h2.store.fs.FileUtils;
 import org.h2.tools.CompressTool;
 import org.h2.util.IOUtils;
@@ -66,7 +65,7 @@ abstract class ScriptBase extends Prepared implements DataHandler {
     private FileStore store;
     private String compressionAlgorithm;
 
-    ScriptBase(Session session) {
+    ScriptBase(SessionLocal session) {
         super(session);
     }
 
@@ -251,14 +250,8 @@ abstract class ScriptBase extends Prepared implements DataHandler {
     }
 
     @Override
-    public int readLob(long lobId, byte[] hmac, long offset, byte[] buff,
-            int off, int length) {
-        throw DbException.throwInternalError();
-    }
-
-    @Override
-    public JavaObjectSerializer getJavaObjectSerializer() {
-        return session.getDataHandler().getJavaObjectSerializer();
+    public int readLob(long lobId, byte[] hmac, long offset, byte[] buff, int off, int length) {
+        throw DbException.getInternalError();
     }
 
     @Override

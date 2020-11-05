@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.util;
@@ -9,8 +9,8 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.Closeable;
 import java.io.EOFException;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -23,7 +23,7 @@ import java.nio.charset.StandardCharsets;
 
 import org.h2.engine.Constants;
 import org.h2.engine.SysProperties;
-import org.h2.message.DbException;
+import org.h2.mvstore.DataUtils;
 import org.h2.store.fs.FileUtils;
 
 /**
@@ -33,22 +33,6 @@ public class IOUtils {
 
     private IOUtils() {
         // utility class
-    }
-
-    /**
-     * Close a Closeable without throwing an exception.
-     *
-     * @param out the Closeable or null
-     */
-    public static void closeSilently(Closeable out) {
-        if (out != null) {
-            try {
-                trace("closeSilently", null, out);
-                out.close();
-            } catch (Exception e) {
-                // ignore
-            }
-        }
     }
 
     /**
@@ -86,7 +70,7 @@ public class IOUtils {
                 skip -= skipped;
             }
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         }
     }
 
@@ -109,7 +93,7 @@ public class IOUtils {
                 skip -= skipped;
             }
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         }
     }
 
@@ -128,7 +112,7 @@ public class IOUtils {
             out.close();
             return len;
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         } finally {
             closeSilently(out);
         }
@@ -147,7 +131,7 @@ public class IOUtils {
         try {
             return copy(in, out);
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         } finally {
             closeSilently(in);
         }
@@ -195,7 +179,7 @@ public class IOUtils {
             }
             return copied;
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         }
     }
 
@@ -228,55 +212,9 @@ public class IOUtils {
             }
             return copied;
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         } finally {
             in.close();
-        }
-    }
-
-    /**
-     * Close an input stream without throwing an exception.
-     *
-     * @param in the input stream or null
-     */
-    public static void closeSilently(InputStream in) {
-        if (in != null) {
-            try {
-                trace("closeSilently", null, in);
-                in.close();
-            } catch (Exception e) {
-                // ignore
-            }
-        }
-    }
-
-    /**
-     * Close a reader without throwing an exception.
-     *
-     * @param reader the reader or null
-     */
-    public static void closeSilently(Reader reader) {
-        if (reader != null) {
-            try {
-                reader.close();
-            } catch (Exception e) {
-                // ignore
-            }
-        }
-    }
-
-    /**
-     * Close a writer without throwing an exception.
-     *
-     * @param writer the writer or null
-     */
-    public static void closeSilently(Writer writer) {
-        if (writer != null) {
-            try {
-                writer.close();
-            } catch (Exception e) {
-                // ignore
-            }
         }
     }
 
@@ -299,7 +237,7 @@ public class IOUtils {
             copy(in, out, length);
             return out.toByteArray();
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         } finally {
             in.close();
         }
@@ -352,7 +290,7 @@ public class IOUtils {
             }
             return result;
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         }
     }
 
@@ -380,7 +318,7 @@ public class IOUtils {
             }
             return result;
         } catch (Exception e) {
-            throw DbException.convertToIOException(e);
+            throw DataUtils.convertToIOException(e);
         }
     }
 
@@ -445,7 +383,7 @@ public class IOUtils {
      */
     public static void trace(String method, String fileName, Object o) {
         if (SysProperties.TRACE_IO) {
-            System.out.println("IOUtils." + method + " " + fileName + " " + o);
+            System.out.println("IOUtils." + method + ' ' + fileName + ' ' + o);
         }
     }
 
@@ -474,6 +412,16 @@ public class IOUtils {
         InputStream in = FileUtils.newInputStream(original);
         OutputStream out = FileUtils.newOutputStream(copy, false);
         copyAndClose(in, out);
+    }
+
+    /**
+     * Converts / and \ name separators in path to native separators.
+     *
+     * @param path path to convert
+     * @return path with converted separators
+     */
+    public static String nameSeparatorsToNative(String path) {
+        return File.separatorChar == '/' ? path.replace('\\', '/') : path.replace('/', '\\');
     }
 
 }

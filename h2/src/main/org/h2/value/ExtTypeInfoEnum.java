@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
@@ -9,6 +9,8 @@ import java.util.Arrays;
 import java.util.Locale;
 
 import org.h2.api.ErrorCode;
+import org.h2.engine.CastDataProvider;
+import org.h2.engine.Constants;
 import org.h2.message.DbException;
 
 /**
@@ -17,6 +19,8 @@ import org.h2.message.DbException;
 public final class ExtTypeInfoEnum extends ExtTypeInfo {
 
     private final String[] enumerators, cleaned;
+
+    private TypeInfo type;
 
     /**
      * Returns enumerators for the two specified values for a binary operation.
@@ -29,40 +33,45 @@ public final class ExtTypeInfoEnum extends ExtTypeInfo {
      *         if both values do not have enumerators
      */
     public static ExtTypeInfoEnum getEnumeratorsForBinaryOperation(Value left, Value right) {
-        if (left.getType() == Value.ENUM) {
+        if (left.getValueType() == Value.ENUM) {
             return ((ValueEnum) left).getEnumerators();
-        } else if (right.getType() == Value.ENUM) {
+        } else if (right.getValueType() == Value.ENUM) {
             return ((ValueEnum) right).getEnumerators();
         } else {
             throw DbException.get(ErrorCode.UNKNOWN_DATA_TYPE_1,
-                    "type1=" + left.getType() + ", type2=" + right.getType());
+                    "type1=" + left.getValueType() + ", type2=" + right.getValueType());
         }
     }
 
     private static String sanitize(String label) {
-        return label == null ? null : label.trim().toUpperCase(Locale.ENGLISH);
+        if (label == null) {
+            return null;
+        }
+        int length = label.length();
+        if (length > Constants.MAX_STRING_LENGTH) {
+            throw DbException.getValueTooLongException("ENUM", label, length);
+        }
+        return label.trim().toUpperCase(Locale.ENGLISH);
     }
 
-    private static String toSQL(String[] enumerators) {
-        StringBuilder result = new StringBuilder();
-        result.append('(');
+    private static StringBuilder toSQL(StringBuilder builder, String[] enumerators) {
+        builder.append('(');
         for (int i = 0; i < enumerators.length; i++) {
             if (i != 0) {
-                result.append(", ");
+                builder.append(", ");
             }
-            result.append('\'');
+            builder.append('\'');
             String s = enumerators[i];
-            for (int j = 0; j < s.length(); j++) {
+            for (int j = 0, length = s.length(); j < length; j++) {
                 char c = s.charAt(j);
                 if (c == '\'') {
-                    result.append('\'');
+                    builder.append('\'');
                 }
-                result.append(c);
+                builder.append(c);
             }
-            result.append('\'');
+            builder.append('\'');
         }
-        result.append(')');
-        return result.toString();
+        return builder.append(')');
     }
 
     /**
@@ -72,18 +81,23 @@ public final class ExtTypeInfoEnum extends ExtTypeInfo {
      *            the enumerators. May not be modified by caller or this class.
      */
     public ExtTypeInfoEnum(String[] enumerators) {
-        if (enumerators == null || enumerators.length == 0) {
+        int length;
+        if (enumerators == null || (length = enumerators.length) == 0) {
             throw DbException.get(ErrorCode.ENUM_EMPTY);
         }
-        final String[] cleaned = new String[enumerators.length];
-        for (int i = 0; i < enumerators.length; i++) {
+        if (length > Constants.MAX_ARRAY_CARDINALITY) {
+            throw DbException.getValueTooLongException("ENUM", "(" + length + " elements)", length);
+        }
+        final String[] cleaned = new String[length];
+        for (int i = 0; i < length; i++) {
             String l = sanitize(enumerators[i]);
             if (l == null || l.isEmpty()) {
                 throw DbException.get(ErrorCode.ENUM_EMPTY);
             }
             for (int j = 0; j < i; j++) {
                 if (l.equals(cleaned[j])) {
-                    throw DbException.get(ErrorCode.ENUM_DUPLICATE, toSQL(enumerators));
+                    throw DbException.get(ErrorCode.ENUM_DUPLICATE, //
+                            toSQL(new StringBuilder(), enumerators).toString());
                 }
             }
             cleaned[i] = l;
@@ -92,33 +106,28 @@ public final class ExtTypeInfoEnum extends ExtTypeInfo {
         this.cleaned = Arrays.equals(cleaned, enumerators) ? enumerators : cleaned;
     }
 
-    @Override
-    public Value cast(Value value) {
-        switch (value.getType()) {
-        case Value.ENUM:
-            if (value instanceof ValueEnum && ((ValueEnum) value).getEnumerators().equals(this)) {
-                return value;
+    TypeInfo getType() {
+        TypeInfo type = this.type;
+        if (type == null) {
+            int p = 0;
+            for (String s : enumerators) {
+                int l = s.length();
+                if (l > p) {
+                    p = l;
+                }
             }
-            //$FALL-THROUGH$
-        case Value.STRING:
-        case Value.STRING_FIXED:
-        case Value.STRING_IGNORECASE:
-            ValueEnum v = getValueOrNull(value.getString());
-            if (v != null) {
-                return v;
-            }
-            break;
-        default:
-            int ordinal = value.getInt();
-            if (ordinal >= 0 && ordinal < enumerators.length) {
-                return new ValueEnum(this, enumerators[ordinal], ordinal);
-            }
+            this.type = type = new TypeInfo(Value.ENUM, p, 0, this);
         }
-        String s = value.getTraceSQL();
-        if (s.length() > 127) {
-            s = s.substring(0, 128) + "...";
-        }
-        throw DbException.get(ErrorCode.ENUM_VALUE_NOT_PERMITTED, toString(), s);
+        return type;
+    }
+
+    /**
+     * Get count of elements in enumeration.
+     *
+     * @return count of elements in enumeration
+     */
+    public int getCount() {
+        return enumerators.length;
     }
 
     /**
@@ -132,28 +141,49 @@ public final class ExtTypeInfoEnum extends ExtTypeInfo {
         return enumerators[ordinal];
     }
 
-    public ValueEnum getValue(int ordinal) {
-        if (ordinal < 0 || ordinal >= enumerators.length) {
-            throw DbException.get(ErrorCode.ENUM_VALUE_NOT_PERMITTED, enumerators.toString(),
-                    Integer.toString(ordinal));
+    /**
+     * Get ValueEnum instance for an ordinal.
+     * @param ordinal ordinal value of an enum
+     * @param provider the cast information provider
+     * @return ValueEnum instance
+     */
+    public ValueEnum getValue(int ordinal, CastDataProvider provider) {
+        String label;
+        if (provider == null || !provider.zeroBasedEnums()) {
+            if (ordinal < 1 || ordinal > enumerators.length) {
+                throw DbException.get(ErrorCode.ENUM_VALUE_NOT_PERMITTED, getTraceSQL(), Integer.toString(ordinal));
+            }
+            label = enumerators[ordinal - 1];
+        } else {
+            if (ordinal < 0 || ordinal >= enumerators.length) {
+                throw DbException.get(ErrorCode.ENUM_VALUE_NOT_PERMITTED, getTraceSQL(), Integer.toString(ordinal));
+            }
+            label = enumerators[ordinal];
         }
-        return new ValueEnum(this, enumerators[ordinal], ordinal);
+        return new ValueEnum(this, label, ordinal);
     }
 
-    public ValueEnum getValue(String label) {
-        ValueEnum value = getValueOrNull(label);
+    /**
+     * Get ValueEnum instance for a label string.
+     * @param label label string
+     * @param provider the cast information provider
+     * @return ValueEnum instance
+     */
+    public ValueEnum getValue(String label, CastDataProvider provider) {
+        ValueEnum value = getValueOrNull(label, provider);
         if (value == null) {
             throw DbException.get(ErrorCode.ENUM_VALUE_NOT_PERMITTED, toString(), label);
         }
         return value;
     }
 
-    private ValueEnum getValueOrNull(String label) {
+    private ValueEnum getValueOrNull(String label, CastDataProvider provider) {
         String l = sanitize(label);
         if (l != null) {
-            for (int ordinal = 0; ordinal < cleaned.length; ordinal++) {
-                if (l.equals(cleaned[ordinal])) {
-                    return new ValueEnum(this, enumerators[ordinal], ordinal);
+            for (int i = 0, ordinal = provider == null || !provider.zeroBasedEnums() ? 1
+                    : 0; i < cleaned.length; i++, ordinal++) {
+                if (l.equals(cleaned[i])) {
+                    return new ValueEnum(this, enumerators[i], ordinal);
                 }
             }
         }
@@ -177,8 +207,8 @@ public final class ExtTypeInfoEnum extends ExtTypeInfo {
     }
 
     @Override
-    public String getCreateSQL() {
-        return toSQL(enumerators);
+    public StringBuilder getSQL(StringBuilder builder, int sqlFlags) {
+        return toSQL(builder, enumerators);
     }
 
 }

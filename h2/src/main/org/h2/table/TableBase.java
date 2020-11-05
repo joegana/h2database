@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.table;
@@ -9,12 +9,9 @@ import java.util.Collections;
 import java.util.List;
 import org.h2.command.ddl.CreateTableData;
 import org.h2.engine.Database;
-import org.h2.engine.DbSettings;
 import org.h2.index.IndexType;
-import org.h2.mvstore.db.MVTableEngine;
 import org.h2.result.SearchRow;
 import org.h2.result.SortOrder;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
 import org.h2.value.Value;
 
@@ -48,14 +45,14 @@ public abstract class TableBase extends Table {
             return SearchRow.ROWID_INDEX;
         }
         IndexColumn first = cols[0];
-        if (first.sortType != SortOrder.ASCENDING) {
+        if ((first.sortType & SortOrder.DESCENDING) != 0) {
             return SearchRow.ROWID_INDEX;
         }
-        switch (first.column.getType()) {
-        case Value.BYTE:
-        case Value.SHORT:
-        case Value.INT:
-        case Value.LONG:
+        switch (first.column.getType().getValueType()) {
+        case Value.TINYINT:
+        case Value.SMALLINT:
+        case Value.INTEGER:
+        case Value.BIGINT:
             return first.column.getColumnId();
         default:
             return SearchRow.ROWID_INDEX;
@@ -73,23 +70,33 @@ public abstract class TableBase extends Table {
             this.tableEngineParams = Collections.emptyList();
         }
         setTemporary(data.temporary);
-        Column[] cols = data.columns.toArray(new Column[0]);
-        setColumns(cols);
+        setColumns(data.columns.toArray(new Column[0]));
     }
 
     @Override
     public String getDropSQL() {
-        return "DROP TABLE IF EXISTS " + getSQL() + " CASCADE";
+        StringBuilder builder = new StringBuilder("DROP TABLE IF EXISTS ");
+        getSQL(builder, DEFAULT_SQL_FLAGS).append(" CASCADE");
+        return builder.toString();
+    }
+
+    @Override
+    public String getCreateSQLForMeta() {
+        return getCreateSQL(true);
     }
 
     @Override
     public String getCreateSQL() {
+        return getCreateSQL(false);
+    }
+
+    private String getCreateSQL(boolean forMeta) {
         Database db = getDatabase();
         if (db == null) {
             // closed
             return null;
         }
-        StatementBuilder buff = new StatementBuilder("CREATE ");
+        StringBuilder buff = new StringBuilder("CREATE ");
         if (isTemporary()) {
             if (isGlobalTemporary()) {
                 buff.append("GLOBAL ");
@@ -106,33 +113,33 @@ public abstract class TableBase extends Table {
         if (isHidden) {
             buff.append("IF NOT EXISTS ");
         }
-        buff.append(getSQL());
+        getSQL(buff, DEFAULT_SQL_FLAGS);
         if (comment != null) {
-            buff.append(" COMMENT ").append(StringUtils.quoteStringSQL(comment));
+            buff.append(" COMMENT ");
+            StringUtils.quoteStringSQL(buff, comment);
         }
         buff.append("(\n    ");
-        for (Column column : columns) {
-            buff.appendExceptFirst(",\n    ");
-            buff.append(column.getCreateSQL());
+        for (int i = 0, l = columns.length; i < l; i++) {
+            if (i > 0) {
+                buff.append(",\n    ");
+            }
+            buff.append(columns[i].getCreateSQL(forMeta));
         }
         buff.append("\n)");
         if (tableEngine != null) {
-            DbSettings s = db.getSettings();
-            String d = s.defaultTableEngine;
-            if (d == null && s.mvStore) {
-                d = MVTableEngine.class.getName();
-            }
+            String d = db.getSettings().defaultTableEngine;
             if (d == null || !tableEngine.endsWith(d)) {
                 buff.append("\nENGINE ");
-                buff.append(StringUtils.quoteIdentifier(tableEngine));
+                StringUtils.quoteIdentifier(buff, tableEngine);
             }
         }
         if (!tableEngineParams.isEmpty()) {
             buff.append("\nWITH ");
-            buff.resetCount();
-            for (String parameter : tableEngineParams) {
-                buff.appendExceptFirst(", ");
-                buff.append(StringUtils.quoteIdentifier(parameter));
+            for (int i = 0, l = tableEngineParams.size(); i < l; i++) {
+                if (i > 0) {
+                    buff.append(", ");
+                }
+                StringUtils.quoteIdentifier(buff, tableEngineParams.get(i));
             }
         }
         if (!isPersistIndexes() && !isPersistData()) {

@@ -1,19 +1,19 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.ddl;
 
+import java.util.ArrayList;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.constraint.ConstraintActionType;
 import org.h2.engine.Database;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.message.DbException;
 import org.h2.schema.Schema;
 import org.h2.schema.SchemaObject;
-import org.h2.util.StatementBuilder;
 
 /**
  * This class represents the statement
@@ -25,7 +25,7 @@ public class DropSchema extends DefineCommand {
     private boolean ifExists;
     private ConstraintActionType dropAction;
 
-    public DropSchema(Session session) {
+    public DropSchema(SessionLocal session) {
         super(session);
         dropAction = session.getDatabase().getSettings().dropRestrict ?
                 ConstraintActionType.RESTRICT : ConstraintActionType.CASCADE;
@@ -36,8 +36,7 @@ public class DropSchema extends DefineCommand {
     }
 
     @Override
-    public int update() {
-        session.getUser().checkSchemaAdmin();
+    public long update() {
         session.commit(true);
         Database db = session.getDatabase();
         Schema schema = db.findSchema(schemaName);
@@ -46,17 +45,22 @@ public class DropSchema extends DefineCommand {
                 throw DbException.get(ErrorCode.SCHEMA_NOT_FOUND_1, schemaName);
             }
         } else {
+            session.getUser().checkSchemaOwner(schema);
             if (!schema.canDrop()) {
                 throw DbException.get(ErrorCode.SCHEMA_CAN_NOT_BE_DROPPED_1, schemaName);
             }
             if (dropAction == ConstraintActionType.RESTRICT && !schema.isEmpty()) {
-                StatementBuilder buff = new StatementBuilder();
-                for (SchemaObject object : schema.getAll(null)) {
-                    buff.appendExceptFirst(", ");
-                    buff.append(object.getName());
-                }
-                if (buff.length() > 0) {
-                    throw DbException.get(ErrorCode.CANNOT_DROP_2, schemaName, buff.toString());
+                ArrayList<SchemaObject> all = schema.getAll(null);
+                int size = all.size();
+                if (size > 0) {
+                    StringBuilder builder = new StringBuilder();
+                    for (int i = 0; i < size; i++) {
+                        if (i > 0) {
+                            builder.append(", ");
+                        }
+                        builder.append(all.get(i).getName());
+                    }
+                    throw DbException.get(ErrorCode.CANNOT_DROP_2, schemaName, builder.toString());
                 }
             }
             db.removeDatabaseObject(session, schema);

@@ -1,29 +1,31 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.mvstore.db;
 
 import java.util.List;
-import org.h2.command.dml.AllColumnsForPlan;
-import org.h2.engine.Session;
-import org.h2.index.BaseIndex;
+
+import org.h2.command.query.AllColumnsForPlan;
+import org.h2.engine.SessionLocal;
 import org.h2.index.Cursor;
 import org.h2.index.IndexType;
 import org.h2.message.DbException;
+import org.h2.mvstore.MVMap;
 import org.h2.result.Row;
+import org.h2.result.RowFactory;
 import org.h2.result.SearchRow;
 import org.h2.result.SortOrder;
 import org.h2.table.Column;
 import org.h2.table.IndexColumn;
 import org.h2.table.TableFilter;
-import org.h2.value.ValueLong;
+import org.h2.value.VersionedValue;
 
 /**
  * An index that delegates indexing to another index.
  */
-public class MVDelegateIndex extends BaseIndex implements MVIndex {
+public class MVDelegateIndex extends MVIndex<Long, SearchRow> {
 
     private final MVPrimaryIndex mainIndex;
 
@@ -35,28 +37,43 @@ public class MVDelegateIndex extends BaseIndex implements MVIndex {
                 indexType);
         this.mainIndex = mainIndex;
         if (id < 0) {
-            throw DbException.throwInternalError(name);
+            throw DbException.getInternalError(name);
         }
     }
 
     @Override
+    public RowFactory getRowFactory() {
+        return mainIndex.getRowFactory();
+    }
+
+    @Override
     public void addRowsToBuffer(List<Row> rows, String bufferName) {
-        throw DbException.throwInternalError();
+        throw DbException.getInternalError();
     }
 
     @Override
     public void addBufferedRows(List<String> bufferNames) {
-        throw DbException.throwInternalError();
+        throw DbException.getInternalError();
     }
 
     @Override
-    public void add(Session session, Row row) {
+    public MVMap<Long,VersionedValue<SearchRow>> getMVMap() {
+        return mainIndex.getMVMap();
+    }
+
+    @Override
+    public void add(SessionLocal session, Row row) {
         // nothing to do
     }
 
     @Override
-    public Row getRow(Session session, long key) {
+    public Row getRow(SessionLocal session, long key) {
         return mainIndex.getRow(session, key);
+    }
+
+    @Override
+    public boolean isRowIdIndex() {
+        return true;
     }
 
     @Override
@@ -65,21 +82,17 @@ public class MVDelegateIndex extends BaseIndex implements MVIndex {
     }
 
     @Override
-    public void close(Session session) {
+    public void close(SessionLocal session) {
         // nothing to do
     }
 
     @Override
-    public Cursor find(Session session, SearchRow first, SearchRow last) {
-        ValueLong min = mainIndex.getKey(first, ValueLong.MIN, ValueLong.MIN);
-        // ifNull is MIN as well, because the column is never NULL
-        // so avoid returning all rows (returning one row is OK)
-        ValueLong max = mainIndex.getKey(last, ValueLong.MAX, ValueLong.MIN);
-        return mainIndex.find(session, min, max);
+    public Cursor find(SessionLocal session, SearchRow first, SearchRow last) {
+        return mainIndex.find(session, first, last);
     }
 
     @Override
-    public Cursor findFirstOrLast(Session session, boolean first) {
+    public Cursor findFirstOrLast(SessionLocal session, boolean first) {
         return mainIndex.findFirstOrLast(session, first);
     }
 
@@ -97,10 +110,10 @@ public class MVDelegateIndex extends BaseIndex implements MVIndex {
     }
 
     @Override
-    public double getCost(Session session, int[] masks,
+    public double getCost(SessionLocal session, int[] masks,
             TableFilter[] filters, int filter, SortOrder sortOrder,
             AllColumnsForPlan allColumnsSet) {
-        return 10 * getCostRangeIndex(masks, mainIndex.getRowCountApproximation(),
+        return 10 * getCostRangeIndex(masks, mainIndex.getRowCountApproximation(session),
                 filters, filter, sortOrder, true, allColumnsSet);
     }
 
@@ -110,43 +123,33 @@ public class MVDelegateIndex extends BaseIndex implements MVIndex {
     }
 
     @Override
-    public void remove(Session session, Row row) {
+    public void remove(SessionLocal session, Row row) {
         // nothing to do
     }
 
     @Override
-    public void update(Session session, Row oldRow, Row newRow) {
+    public void update(SessionLocal session, Row oldRow, Row newRow) {
         // nothing to do
     }
 
     @Override
-    public void remove(Session session) {
+    public void remove(SessionLocal session) {
         mainIndex.setMainIndexColumn(SearchRow.ROWID_INDEX);
     }
 
     @Override
-    public void truncate(Session session) {
+    public void truncate(SessionLocal session) {
         // nothing to do
     }
 
     @Override
-    public void checkRename() {
-        // ok
-    }
-
-    @Override
-    public long getRowCount(Session session) {
+    public long getRowCount(SessionLocal session) {
         return mainIndex.getRowCount(session);
     }
 
     @Override
-    public long getRowCountApproximation() {
-        return mainIndex.getRowCountApproximation();
-    }
-
-    @Override
-    public long getDiskSpaceUsed() {
-        return 0;
+    public long getRowCountApproximation(SessionLocal session) {
+        return mainIndex.getRowCountApproximation(session);
     }
 
 }

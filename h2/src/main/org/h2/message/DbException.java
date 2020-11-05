@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.message;
@@ -55,6 +55,10 @@ public class DbException extends RuntimeException {
 
     private static final Properties MESSAGES = new Properties();
 
+    /**
+     * Thrown when OOME exception happens on handle error
+     * inside {@link #convert(java.lang.Throwable)}.
+     */
     public static final SQLException SQL_OOME =
             new SQLException("OutOfMemoryError", "HY000", OUT_OF_MEMORY, new OutOfMemoryError());
     private static final DbException OOME = new DbException(SQL_OOME);
@@ -63,8 +67,7 @@ public class DbException extends RuntimeException {
 
     static {
         try {
-            byte[] messages = Utils.getResource(
-                    "/org/h2/res/_messages_en.prop");
+            byte[] messages = Utils.getResource("/org/h2/res/_messages_en.prop");
             if (messages != null) {
                 MESSAGES.load(new ByteArrayInputStream(messages));
             }
@@ -88,9 +91,7 @@ public class DbException extends RuntimeException {
                     }
                 }
             }
-        } catch (OutOfMemoryError e) {
-            DbException.traceThrowable(e);
-        } catch (IOException e) {
+        } catch (OutOfMemoryError | IOException e) {
             DbException.traceThrowable(e);
         }
     }
@@ -100,11 +101,7 @@ public class DbException extends RuntimeException {
     }
 
     private static String translate(String key, String... params) {
-        String message = null;
-        if (MESSAGES != null) {
-            // Tomcat sets final static fields to null sometimes
-            message = MESSAGES.getProperty(key);
-        }
+        String message = MESSAGES.getProperty(key);
         if (message == null) {
             message = "(Message " + key + " not found)";
         }
@@ -272,36 +269,66 @@ public class DbException extends RuntimeException {
      *
      * @param param the name of the parameter
      * @param value the value passed
-     * @return the IllegalArgumentException object
+     * @return the exception
      */
     public static DbException getInvalidValueException(String param, Object value) {
         return get(INVALID_VALUE_2, value == null ? "null" : value.toString(), param);
     }
 
     /**
-     * Throw an internal error. This method seems to return an exception object,
-     * so that it can be used instead of 'return', but in fact it always throws
-     * the exception.
+     * Gets a SQL exception meaning this value is too long.
      *
-     * @param s the message
-     * @return the RuntimeException object
-     * @throws RuntimeException the exception
+     * @param columnOrType
+     *            column with data type or data type name
+     * @param value
+     *            string representation of value, will be truncated to 80
+     *            characters
+     * @param valueLength
+     *            the actual length of value, {@code -1L} if unknown
+     * @return the exception
      */
-    public static RuntimeException throwInternalError(String s) {
-        RuntimeException e = new RuntimeException(s);
-        DbException.traceThrowable(e);
-        throw e;
+    public static DbException getValueTooLongException(String columnOrType, String value, long valueLength) {
+        int length = value.length();
+        int m = valueLength >= 0 ? 22 : 0;
+        StringBuilder builder = length > 80 //
+                ? new StringBuilder(83 + m).append(value, 0, 80).append("...")
+                : new StringBuilder(length + m).append(value);
+        if (valueLength >= 0) {
+            builder.append(" (").append(valueLength).append(')');
+        }
+        return get(VALUE_TOO_LONG_2, columnOrType, builder.toString());
     }
 
     /**
-     * Throw an internal error. This method seems to return an exception object,
-     * so that it can be used instead of 'return', but in fact it always throws
-     * the exception.
+     * Gets a file version exception.
+     *
+     * @param dataFileName the name of the database
+     * @return the exception
+     */
+    public static DbException getFileVersionError(String dataFileName) {
+        return DbException.get(FILE_VERSION_ERROR_1, "Old database: " + dataFileName
+                + " - please convert the database to a SQL script and re-create it.");
+    }
+
+    /**
+     * Gets an internal error.
+     *
+     * @param s the message
+     * @return the RuntimeException object
+     */
+    public static RuntimeException getInternalError(String s) {
+        RuntimeException e = new RuntimeException(s);
+        DbException.traceThrowable(e);
+        return e;
+    }
+
+    /**
+     * Gets an internal error.
      *
      * @return the RuntimeException object
      */
-    public static RuntimeException throwInternalError() {
-        return throwInternalError("Unexpected code path");
+    public static RuntimeException getInternalError() {
+        return getInternalError("Unexpected code path");
     }
 
     /**
@@ -343,6 +370,8 @@ public class DbException extends RuntimeException {
                 throw (Error) e;
             }
             return get(GENERAL_ERROR_1, e, e.toString());
+        } catch (OutOfMemoryError ignore) {
+            return OOME;
         } catch (Throwable ex) {
             try {
                 DbException dbException = new DbException(
@@ -434,6 +463,7 @@ public class DbException extends RuntimeException {
      * @param errorCode the error code
      * @param cause the exception that was the reason for this exception
      * @param stackTrace the stack trace
+     * @return the SQLException object
      */
     public static SQLException getJdbcSQLException(String message, String sql, String state, int errorCode,
             Throwable cause, String stackTrace) {
@@ -445,6 +475,7 @@ public class DbException extends RuntimeException {
         case 7:
         case 21:
         case 42:
+        case 54:
             return new JdbcSQLSyntaxErrorException(message, sql, state, errorCode, cause, stackTrace);
         case 8:
             return new JdbcSQLNonTransientConnectionException(message, sql, state, errorCode, cause, stackTrace);
@@ -496,6 +527,7 @@ public class DbException extends RuntimeException {
         case METHOD_NOT_ALLOWED_FOR_PREPARED_STATEMENT:
         case ACCESS_DENIED_TO_CLASS_1:
         case RESULT_SET_READONLY:
+        case CURRENT_SEQUENCE_VALUE_IS_NOT_DEFINED_IN_SESSION_1:
             return new JdbcSQLNonTransientException(message, sql, state, errorCode, cause, stackTrace);
         case FEATURE_NOT_SUPPORTED_1:
             return new JdbcSQLFeatureNotSupportedException(message, sql, state, errorCode, cause, stackTrace);
@@ -504,7 +536,7 @@ public class DbException extends RuntimeException {
         case LOB_CLOSED_ON_TIMEOUT_1:
             return new JdbcSQLTimeoutException(message, sql, state, errorCode, cause, stackTrace);
         case FUNCTION_MUST_RETURN_RESULT_SET_1:
-        case TRIGGER_SELECT_AND_ROW_BASED_NOT_SUPPORTED:
+        case INVALID_TRIGGER_FLAGS_1:
         case SUM_OR_AVG_ON_WRONG_DATATYPE_1:
         case MUST_GROUP_BY_COLUMN_1:
         case SECOND_PRIMARY_KEY:
@@ -520,7 +552,6 @@ public class DbException extends RuntimeException {
         case TRIGGER_NOT_FOUND_1:
         case ERROR_CREATING_TRIGGER_OBJECT_3:
         case CONSTRAINT_ALREADY_EXISTS_1:
-        case INVALID_VALUE_SCALE_PRECISION:
         case SUBQUERY_IS_NOT_SINGLE_COLUMN:
         case INVALID_USE_OF_AGGREGATE_FUNCTION_1:
         case CONSTRAINT_NOT_FOUND_1:
@@ -551,13 +582,13 @@ public class DbException extends RuntimeException {
         case CANNOT_TRUNCATE_1:
         case CANNOT_DROP_2:
         case VIEW_IS_INVALID_2:
-        case COMPARING_ARRAY_TO_SCALAR:
+        case TYPES_ARE_NOT_COMPARABLE_2:
         case CONSTANT_ALREADY_EXISTS_1:
         case CONSTANT_NOT_FOUND_1:
         case LITERALS_ARE_NOT_ALLOWED:
         case CANNOT_DROP_TABLE_1:
-        case USER_DATA_TYPE_ALREADY_EXISTS_1:
-        case USER_DATA_TYPE_NOT_FOUND_1:
+        case DOMAIN_ALREADY_EXISTS_1:
+        case DOMAIN_NOT_FOUND_1:
         case WITH_TIES_WITHOUT_ORDER_BY:
         case CANNOT_MIX_INDEXED_AND_UNINDEXED_PARAMS:
         case TRANSACTION_NOT_FOUND_1:
@@ -566,11 +597,19 @@ public class DbException extends RuntimeException {
         case CAN_ONLY_ASSIGN_TO_VARIABLE_1:
         case PUBLIC_STATIC_JAVA_METHOD_NOT_FOUND_1:
         case JAVA_OBJECT_SERIALIZER_CHANGE_WITH_DATA_TABLE:
+        case FOR_UPDATE_IS_NOT_ALLOWED_IN_DISTINCT_OR_GROUPED_SELECT:
+        case INVALID_VALUE_PRECISION:
+        case INVALID_VALUE_SCALE:
+        case CONSTRAINT_IS_USED_BY_CONSTRAINT_2:
+        case UNCOMPARABLE_REFERENCED_COLUMN_2:
+        case GENERATED_COLUMN_CANNOT_BE_ASSIGNED_1:
+        case GENERATED_COLUMN_CANNOT_BE_UPDATABLE_BY_CONSTRAINT_2:
+        case COLUMN_ALIAS_IS_NOT_SPECIFIED_1:
             return new JdbcSQLSyntaxErrorException(message, sql, state, errorCode, cause, stackTrace);
         case HEX_STRING_ODD_1:
         case HEX_STRING_WRONG_1:
         case INVALID_VALUE_2:
-        case SEQUENCE_ATTRIBUTES_INVALID:
+        case SEQUENCE_ATTRIBUTES_INVALID_7:
         case INVALID_TO_CHAR_FORMAT:
         case PARAMETER_NOT_SET_1:
         case PARSE_ERROR_1:
@@ -583,6 +622,8 @@ public class DbException extends RuntimeException {
             return new JdbcSQLDataException(message, sql, state, errorCode, cause, stackTrace);
         case URL_RELATIVE_TO_CWD:
         case DATABASE_NOT_FOUND_1:
+        case DATABASE_NOT_FOUND_WITH_IF_EXISTS_1:
+        case REMOTE_DATABASE_NOT_FOUND_1:
         case TRACE_CONNECTION_NOT_CLOSED:
         case DATABASE_ALREADY_OPEN_1:
         case FILE_CORRUPTED_1:
@@ -609,6 +650,7 @@ public class DbException extends RuntimeException {
         case DATABASE_IS_IN_EXCLUSIVE_MODE:
         case INVALID_DATABASE_NAME_1:
         case AUTHENTICATOR_NOT_AVAILABLE:
+        case METHOD_DISABLED_ON_AUTOCOMMIT_TRUE:
             return new JdbcSQLNonTransientConnectionException(message, sql, state, errorCode, cause, stackTrace);
         case ROW_NOT_FOUND_WHEN_DELETING_1:
         case CONCURRENT_UPDATE_1:
@@ -621,24 +663,6 @@ public class DbException extends RuntimeException {
 
     private static String filterSQL(String sql) {
         return sql == null || !sql.contains(HIDE_SQL) ? sql : "-";
-    }
-
-    /**
-     * Convert an exception to an IO exception.
-     *
-     * @param e the root cause
-     * @return the IO exception
-     */
-    public static IOException convertToIOException(Throwable e) {
-        if (e instanceof IOException) {
-            return (IOException) e;
-        }
-        if (e instanceof JdbcException) {
-            if (e.getCause() != null) {
-                e = e.getCause();
-            }
-        }
-        return new IOException(e.toString(), e);
     }
 
     /**
@@ -665,7 +689,7 @@ public class DbException extends RuntimeException {
      * @param s print writer
      */
     public static void printNextExceptions(SQLException e, PrintWriter s) {
-        // getNextException().printStackTrace(s) would be very very slow
+        // getNextException().printStackTrace(s) would be very slow
         // if many exceptions are joined
         int i = 0;
         while ((e = e.getNextException()) != null) {
@@ -684,7 +708,7 @@ public class DbException extends RuntimeException {
      * @param s print stream
      */
     public static void printNextExceptions(SQLException e, PrintStream s) {
-        // getNextException().printStackTrace(s) would be very very slow
+        // getNextException().printStackTrace(s) would be very slow
         // if many exceptions are joined
         int i = 0;
         while ((e = e.getNextException()) != null) {

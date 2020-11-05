@@ -1,39 +1,43 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.build.doc;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 
 import org.h2.bnf.Bnf;
 import org.h2.engine.Constants;
 import org.h2.server.web.PageParser;
-import org.h2.util.IOUtils;
 import org.h2.util.JdbcUtils;
 import org.h2.util.StringUtils;
 
 /**
  * This application generates sections of the documentation
- * by converting the built-in help section (INFORMATION_SCHEMA.HELP)
+ * by converting the built-in help section
  * to cross linked html.
  */
 public class GenerateDoc {
 
     private static final String IN_HELP = "src/docsrc/help/help.csv";
-    private String inDir = "src/docsrc/html";
-    private String outDir = "docs/html";
+    private Path inDir = Paths.get("src/docsrc/html");
+    private Path outDir = Paths.get("docs/html");
     private Connection conn;
     private final HashMap<String, Object> session =
             new HashMap<>();
@@ -52,22 +56,21 @@ public class GenerateDoc {
     private void run(String... args) throws Exception {
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("-in")) {
-                inDir = args[++i];
+                inDir = Paths.get(args[++i]);
             } else if (args[i].equals("-out")) {
-                outDir = args[++i];
+                outDir = Paths.get(args[++i]);
             }
         }
         Class.forName("org.h2.Driver");
         conn = DriverManager.getConnection("jdbc:h2:mem:");
-        new File(outDir).mkdirs();
-        new RailroadImages().run(outDir + "/images");
+        Files.createDirectories(outDir);
+        new RailroadImages().run(outDir.resolve("images"));
         bnf = Bnf.getInstance(null);
         bnf.linkStatements();
-        session.put("version", Constants.getVersion());
+        session.put("version", Constants.VERSION);
         session.put("versionDate", Constants.BUILD_DATE);
-        session.put("stableVersion", Constants.getVersionStable());
+        session.put("stableVersion", Constants.VERSION_STABLE);
         session.put("stableVersionDate", Constants.BUILD_DATE_STABLE);
-        // String help = "SELECT * FROM INFORMATION_SCHEMA.HELP WHERE SECTION";
         String help = "SELECT ROWNUM ID, * FROM CSVREAD('" +
                 IN_HELP + "', NULL, 'lineComment=#') WHERE SECTION ";
         map("commandsDML",
@@ -76,12 +79,13 @@ public class GenerateDoc {
                 help + "= 'Commands (DDL)' ORDER BY ID", true, false);
         map("commandsOther",
                 help + "= 'Commands (Other)' ORDER BY ID", true, false);
+        map("literals",
+                help + "= 'Literals' ORDER BY ID", true, false);
         map("datetimeFields",
                 help + "= 'Datetime fields' ORDER BY ID", true, false);
         map("otherGrammar",
                 help + "= 'Other Grammar' ORDER BY ID", true, false);
-        map("functionsAggregate",
-                help + "= 'Functions (Aggregate)' ORDER BY ID", true, false);
+
         map("functionsNumeric",
                 help + "= 'Functions (Numeric)' ORDER BY ID", true, false);
         map("functionsString",
@@ -90,8 +94,33 @@ public class GenerateDoc {
                 help + "= 'Functions (Time and Date)' ORDER BY ID", true, false);
         map("functionsSystem",
                 help + "= 'Functions (System)' ORDER BY ID", true, false);
-        map("functionsWindow",
-                help + "= 'Functions (Window)' ORDER BY ID", true, false);
+        map("functionsJson",
+                help + "= 'Functions (JSON)' ORDER BY ID", true, false);
+        map("functionsTable",
+                help + "= 'Functions (Table)' ORDER BY ID", true, false);
+
+        map("aggregateFunctionsGeneral",
+                help + "= 'Aggregate Functions (General)' ORDER BY ID", true, false);
+        map("aggregateFunctionsOrdered",
+                help + "= 'Aggregate Functions (Ordered)' ORDER BY ID", true, false);
+        map("aggregateFunctionsHypothetical",
+                help + "= 'Aggregate Functions (Hypothetical Set)' ORDER BY ID", true, false);
+        map("aggregateFunctionsInverse",
+                help + "= 'Aggregate Functions (Inverse Distribution)' ORDER BY ID", true, false);
+        map("aggregateFunctionsJSON",
+                help + "= 'Aggregate Functions (JSON)' ORDER BY ID", true, false);
+
+        map("windowFunctionsRowNumber",
+                help + "= 'Window Functions (Row Number)' ORDER BY ID", true, false);
+        map("windowFunctionsRank",
+                help + "= 'Window Functions (Rank)' ORDER BY ID", true, false);
+        map("windowFunctionsLeadLag",
+                help + "= 'Window Functions (Lead or Lag)' ORDER BY ID", true, false);
+        map("windowFunctionsNth",
+                help + "= 'Window Functions (Nth Value)' ORDER BY ID", true, false);
+        map("windowFunctionsOther",
+                help + "= 'Window Functions (Other)' ORDER BY ID", true, false);
+
         map("dataTypes",
                 help + "LIKE 'Data Types%' ORDER BY SECTION, ID", true, true);
         map("intervalDataTypes",
@@ -102,38 +131,31 @@ public class GenerateDoc {
                 "FROM INFORMATION_SCHEMA.COLUMNS " +
                 "WHERE TABLE_SCHEMA='INFORMATION_SCHEMA' " +
                 "GROUP BY TABLE_NAME ORDER BY TABLE_NAME", false, false);
-        processAll("");
+        Files.walkFileTree(inDir, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                process(file);
+                return FileVisitResult.CONTINUE;
+            }
+        });
         conn.close();
     }
 
-    private void processAll(String dir) throws Exception {
-        if (dir.endsWith(".svn")) {
-            return;
-        }
-        File[] list = new File(inDir + "/" + dir).listFiles();
-        for (File file : list) {
-            if (file.isDirectory()) {
-                processAll(dir + file.getName());
-            } else {
-                process(dir, file.getName());
-            }
-        }
-    }
-
-    private void process(String dir, String fileName) throws Exception {
-        String inFile = inDir + "/" + dir + "/" + fileName;
-        String outFile = outDir + "/" + dir + "/" + fileName;
-        new File(outFile).getParentFile().mkdirs();
-        FileOutputStream out = new FileOutputStream(outFile);
-        FileInputStream in = new FileInputStream(inFile);
-        byte[] bytes = IOUtils.readBytesAndClose(in, 0);
-        if (fileName.endsWith(".html")) {
+    /**
+     * Process a file.
+     *
+     * @param inFile the file
+     */
+    void process(Path inFile) throws IOException {
+        Path outFile = outDir.resolve(inDir.relativize(inFile));
+        Files.createDirectories(outFile.getParent());
+        byte[] bytes = Files.readAllBytes(inFile);
+        if (inFile.getFileName().toString().endsWith(".html")) {
             String page = new String(bytes);
             page = PageParser.parse(page, session);
             bytes = page.getBytes();
         }
-        out.write(bytes);
-        out.close();
+        Files.write(outFile, bytes);
     }
 
     private void map(String key, String sql, boolean railroads, boolean forDataTypes)
@@ -178,6 +200,7 @@ public class GenerateDoc {
                     text = StringUtils.replaceAll(text,
                             "<br />", " ");
                     text = addCode(text);
+                    text = addLinks(text);
                     map.put("text", text);
                 }
 
@@ -193,8 +216,9 @@ public class GenerateDoc {
             int div = 3;
             int part = (list.size() + div - 1) / div;
             for (int i = 0, start = 0; i < div; i++, start += part) {
-                List<HashMap<String, String>> listThird = list.subList(start,
-                        Math.min(start + part, list.size()));
+                int end = Math.min(start + part, list.size());
+                List<HashMap<String, String>> listThird = start <= end ? list.subList(start, end)
+                        : Collections.emptyList();
                 session.put(key + "-" + i, listThird);
             }
         } finally {
@@ -254,4 +278,54 @@ public class GenerateDoc {
         s = StringUtils.replaceAll(s, "<code>GB</code>", "GB");
         return s;
     }
+
+    private static String addLinks(String text) {
+        int start = nextLink(text, 0);
+        if (start < 0) {
+            return text;
+        }
+        StringBuilder buff = new StringBuilder(text.length());
+        int len = text.length();
+        int offset = 0;
+        do {
+            if (start > 2 && text.regionMatches(start - 2, "](https://h2database.com/html/", 0, 30)) {
+                int descEnd = start - 2;
+                int descStart = text.lastIndexOf('[', descEnd - 1) + 1;
+                int linkStart = start + 28;
+                int linkEnd = text.indexOf(')', start + 29);
+                buff.append(text, offset, descStart - 1) //
+                        .append("<a href=\"").append(text, linkStart, linkEnd).append("\">") //
+                        .append(text, descStart, descEnd) //
+                        .append("</a>");
+                offset = linkEnd + 1;
+            } else {
+                int end = start + 7;
+                for (; end < len && !Character.isWhitespace(text.charAt(end)); end++) {
+                    // Nothing to do
+                }
+                buff.append(text, offset, start) //
+                        .append("<a href=\"").append(text, start, end).append("\">") //
+                        .append(text, start, end) //
+                        .append("</a>");
+                offset = end;
+            }
+        } while ((start = nextLink(text, offset)) >= 0);
+        return buff.append(text, offset, len).toString();
+    }
+
+    private static int nextLink(String text, int i) {
+        int found = -1;
+        found = findLink(text, i, "http://", found);
+        found = findLink(text, i, "https://", found);
+        return found;
+    }
+
+    private static int findLink(String text, int offset, String prefix, int found) {
+        int idx = text.indexOf(prefix, offset);
+        if (idx >= 0 && (found < 0 || idx < found)) {
+            found = idx;
+        }
+        return found;
+    }
+
 }

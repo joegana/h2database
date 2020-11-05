@@ -1,34 +1,29 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.dml;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Objects;
+import java.util.HashSet;
 
-import org.h2.api.ErrorCode;
 import org.h2.api.Trigger;
 import org.h2.command.CommandInterface;
 import org.h2.command.Prepared;
+import org.h2.command.query.AllColumnsForPlan;
+import org.h2.engine.DbObject;
 import org.h2.engine.Right;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
-import org.h2.expression.Parameter;
-import org.h2.expression.ValueExpression;
-import org.h2.message.DbException;
+import org.h2.expression.ExpressionVisitor;
 import org.h2.result.ResultInterface;
+import org.h2.result.ResultTarget;
 import org.h2.result.Row;
 import org.h2.result.RowList;
-import org.h2.table.Column;
 import org.h2.table.PlanItem;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
-import org.h2.util.StatementBuilder;
-import org.h2.util.StringUtils;
-import org.h2.util.Utils;
+import org.h2.table.DataChangeDeltaTable.ResultOption;
 import org.h2.value.Value;
 import org.h2.value.ValueNull;
 
@@ -36,25 +31,25 @@ import org.h2.value.ValueNull;
  * This class represents the statement
  * UPDATE
  */
-public class Update extends Prepared {
+public final class Update extends DataChangeStatement {
 
     private Expression condition;
     private TableFilter targetTableFilter;// target of update
-    /**
-     * This table filter is for MERGE..USING support - not used in stand-alone DML
-     */
-    private TableFilter sourceTableFilter;
 
     /** The limit expression as specified in the LIMIT clause. */
     private Expression limitExpr;
 
-    private boolean updateToCurrentValuesReturnsZero;
+    private SetClauseList setClauseList;
 
-    private final ArrayList<Column> columns = Utils.newSmallArrayList();
-    private final HashMap<Column, Expression> expressionMap  = new HashMap<>();
+    private Insert onDuplicateKeyInsert;
 
-    public Update(Session session) {
+    public Update(SessionLocal session) {
         super(session);
+    }
+
+    @Override
+    public Table getTable() {
+        return targetTableFilter.getTable();
     }
 
     public void setTableFilter(TableFilter tableFilter) {
@@ -69,40 +64,22 @@ public class Update extends Prepared {
         return this.condition;
     }
 
-    /**
-     * Add an assignment of the form column = expression.
-     *
-     * @param column the column
-     * @param expression the expression
-     */
-    public void setAssignment(Column column, Expression expression) {
-        if (expressionMap.containsKey(column)) {
-            throw DbException.get(ErrorCode.DUPLICATE_COLUMN_NAME_1, column
-                    .getName());
-        }
-        columns.add(column);
-        expressionMap.put(column, expression);
-        if (expression instanceof Parameter) {
-            Parameter p = (Parameter) expression;
-            p.setColumn(column);
-        }
+    public void setSetClauseList(SetClauseList setClauseList) {
+        this.setClauseList = setClauseList;
     }
 
     @Override
-    public int update() {
+    public long update(ResultTarget deltaChangeCollector, ResultOption deltaChangeCollectionMode) {
         targetTableFilter.startQuery(session);
         targetTableFilter.reset();
-        RowList rows = new RowList(session);
-        try {
-            Table table = targetTableFilter.getTable();
-            session.getUser().checkRight(table, Right.UPDATE);
+        Table table = targetTableFilter.getTable();
+        try (RowList rows = new RowList(session, table)) {
+            session.getUser().checkTableRight(table, Right.UPDATE);
             table.fire(session, Trigger.UPDATE, true);
             table.lock(session, true, false);
-            int columnCount = table.getColumns().length;
             // get the old rows, compute the new rows
             setCurrentRowNumber(0);
-            int count = 0;
-            Column[] columns = table.getColumns();
+            long count = 0;
             int limitRows = -1;
             if (limitExpr != null) {
                 Value v = limitExpr.getValue(session);
@@ -117,126 +94,78 @@ public class Update extends Prepared {
                 }
                 if (condition == null || condition.getBooleanValue(session)) {
                     Row oldRow = targetTableFilter.get();
-                    Row newRow = table.getTemplateRow();
-                    boolean setOnUpdate = false;
-                    for (int i = 0; i < columnCount; i++) {
-                        Expression newExpr = expressionMap.get(columns[i]);
-                        Column column = table.getColumn(i);
-                        Value newValue;
-                        if (newExpr == null) {
-                            if (column.getOnUpdateExpression() != null) {
-                                setOnUpdate = true;
-                            }
-                            newValue = oldRow.getValue(i);
-                        } else if (newExpr == ValueExpression.getDefault()) {
-                            newValue = table.getDefaultValue(session, column);
-                        } else {
-                            newValue = column.convert(newExpr.getValue(session), session.getDatabase().getMode());
+                    if (table.isMVStore()) {
+                        Row lockedRow = table.lockRow(session, oldRow);
+                        if (lockedRow == null) {
+                            continue;
                         }
-                        newRow.setValue(i, newValue);
-                    }
-                    newRow.setKey(oldRow.getKey());
-                    if (setOnUpdate || updateToCurrentValuesReturnsZero) {
-                        setOnUpdate = false;
-                        for (int i = 0; i < columnCount; i++) {
-                            // Use equals here to detect changes from numeric 0 to 0.0 and similar
-                            if (!Objects.equals(oldRow.getValue(i), newRow.getValue(i))) {
-                                setOnUpdate = true;
-                                break;
+                        if (!oldRow.hasSharedData(lockedRow)) {
+                            oldRow = lockedRow;
+                            targetTableFilter.set(oldRow);
+                            if (condition != null && !condition.getBooleanValue(session)) {
+                                continue;
                             }
                         }
-                        if (setOnUpdate) {
-                            for (int i = 0; i < columnCount; i++) {
-                                if (expressionMap.get(columns[i]) == null) {
-                                    Column column = table.getColumn(i);
-                                    if (column.getOnUpdateExpression() != null) {
-                                        newRow.setValue(i, table.getOnUpdateValue(session, column));
-                                    }
-                                }
-                            }
-                        } else if (updateToCurrentValuesReturnsZero) {
-                            count--;
-                        }
                     }
-                    table.validateConvertUpdateSequence(session, newRow);
-                    boolean done = false;
-                    if (table.fireRow()) {
-                        done = table.fireBeforeRow(session, oldRow, newRow);
+                    if (setClauseList.prepareUpdate(table, session, deltaChangeCollector, deltaChangeCollectionMode,
+                            rows, oldRow, onDuplicateKeyInsert != null)) {
+                        count++;
                     }
-                    if (!done) {
-                        rows.add(oldRow);
-                        rows.add(newRow);
-                    }
-                    count++;
                 }
             }
-            // TODO self referencing referential integrity constraints
-            // don't work if update is multi-row and 'inversed' the condition!
-            // probably need multi-row triggers with 'deleted' and 'inserted'
-            // at the same time. anyway good for sql compatibility
-            // TODO update in-place (but if the key changes,
-            // we need to update all indexes) before row triggers
-
-            // the cached row is already updated - we need the old values
-            table.updateRows(this, session, rows);
-            if (table.fireRow()) {
-                rows.invalidateCache();
-                for (rows.reset(); rows.hasNext();) {
-                    Row o = rows.next();
-                    Row n = rows.next();
-                    table.fireAfterRow(session, o, n, false);
-                }
-            }
+            doUpdate(this, session, table, rows);
             table.fire(session, Trigger.UPDATE, false);
             return count;
-        } finally {
-            rows.close();
+        }
+    }
+
+    static void doUpdate(Prepared prepared, SessionLocal session, Table table, RowList rows) {
+        // TODO self referencing referential integrity constraints
+        // don't work if update is multi-row and 'inversed' the condition!
+        // probably need multi-row triggers with 'deleted' and 'inserted'
+        // at the same time. anyway good for sql compatibility
+        // TODO update in-place (but if the key changes,
+        // we need to update all indexes) before row triggers
+
+        // the cached row is already updated - we need the old values
+        table.updateRows(prepared, session, rows);
+        if (table.fireRow()) {
+            for (rows.reset(); rows.hasNext();) {
+                Row o = rows.next();
+                Row n = rows.next();
+                table.fireAfterRow(session, o, n, false);
+            }
         }
     }
 
     @Override
-    public String getPlanSQL() {
-        StatementBuilder buff = new StatementBuilder("UPDATE ");
-        buff.append(targetTableFilter.getPlanSQL(false)).append("\nSET\n    ");
-        for (Column c : columns) {
-            Expression e = expressionMap.get(c);
-            buff.appendExceptFirst(",\n    ");
-            buff.append(c.getName()).append(" = ").append(e.getSQL());
-        }
+    public String getPlanSQL(int sqlFlags) {
+        StringBuilder builder = new StringBuilder("UPDATE ");
+        targetTableFilter.getPlanSQL(builder, false, sqlFlags);
+        setClauseList.getSQL(builder, sqlFlags);
         if (condition != null) {
-            buff.append("\nWHERE ").append(StringUtils.unEnclose(condition.getSQL()));
+            builder.append("\nWHERE ");
+            condition.getUnenclosedSQL(builder, sqlFlags);
         }
         if (limitExpr != null) {
-            buff.append("\nLIMIT ").append(
-                    StringUtils.unEnclose(limitExpr.getSQL()));
+            builder.append("\nLIMIT ");
+            limitExpr.getUnenclosedSQL(builder, sqlFlags);
         }
-        return buff.toString();
+        return builder.toString();
     }
 
     @Override
     public void prepare() {
         if (condition != null) {
             condition.mapColumns(targetTableFilter, 0, Expression.MAP_INITIAL);
-            condition = condition.optimize(session);
-            condition.createIndexConditions(session, targetTableFilter);
-        }
-        for (Column c : columns) {
-            Expression e = expressionMap.get(c);
-            e.mapColumns(targetTableFilter, 0, Expression.MAP_INITIAL);
-            if (sourceTableFilter!=null){
-                e.mapColumns(sourceTableFilter, 0, Expression.MAP_INITIAL);
+            condition = condition.optimizeCondition(session);
+            if (condition != null) {
+                condition.createIndexConditions(session, targetTableFilter);
             }
-            expressionMap.put(c, e.optimize(session));
         }
-        TableFilter[] filters;
-        if(sourceTableFilter==null){
-            filters = new TableFilter[] { targetTableFilter };
-        }
-        else{
-            filters = new TableFilter[] { targetTableFilter, sourceTableFilter };
-        }
-        PlanItem item = targetTableFilter.getBestPlanItem(session, filters, 0,
-                new AllColumnsForPlan(filters));
+        setClauseList.mapAndOptimize(session, targetTableFilter, null);
+        TableFilter[] filters = new TableFilter[] { targetTableFilter };
+        PlanItem item = targetTableFilter.getBestPlanItem(session, filters, 0, new AllColumnsForPlan(filters));
         targetTableFilter.setPlanItem(item);
         targetTableFilter.prepare();
     }
@@ -256,6 +185,11 @@ public class Update extends Prepared {
         return CommandInterface.UPDATE;
     }
 
+    @Override
+    public String getStatementName() {
+        return "UPDATE";
+    }
+
     public void setLimit(Expression limit) {
         this.limitExpr = limit;
     }
@@ -265,21 +199,21 @@ public class Update extends Prepared {
         return true;
     }
 
-    public TableFilter getSourceTableFilter() {
-        return sourceTableFilter;
+    @Override
+    public void collectDependencies(HashSet<DbObject> dependencies) {
+        ExpressionVisitor visitor = ExpressionVisitor.getDependenciesVisitor(dependencies);
+        if (condition != null) {
+            condition.isEverything(visitor);
+        }
+        setClauseList.isEverything(visitor);
     }
 
-    public void setSourceTableFilter(TableFilter sourceTableFilter) {
-        this.sourceTableFilter = sourceTableFilter;
+    public Insert getOnDuplicateKeyInsert() {
+        return onDuplicateKeyInsert;
     }
 
-    /**
-     * Sets expected update count for update to current values case.
-     *
-     * @param updateToCurrentValuesReturnsZero if zero should be returned as update
-     *        count if update set row to current values
-     */
-    public void setUpdateToCurrentValuesReturnsZero(boolean updateToCurrentValuesReturnsZero) {
-        this.updateToCurrentValuesReturnsZero = updateToCurrentValuesReturnsZero;
+    void setOnDuplicateKeyInsert(Insert onDuplicateKeyInsert) {
+        this.onDuplicateKeyInsert = onDuplicateKeyInsert;
     }
+
 }

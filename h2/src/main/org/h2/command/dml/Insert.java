@@ -1,73 +1,77 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.dml;
 
-import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map.Entry;
 
 import org.h2.api.ErrorCode;
 import org.h2.api.Trigger;
 import org.h2.command.Command;
 import org.h2.command.CommandInterface;
-import org.h2.command.Prepared;
-import org.h2.engine.GeneratedKeys;
-import org.h2.engine.Mode;
+import org.h2.command.query.Query;
+import org.h2.engine.DbObject;
 import org.h2.engine.Right;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.engine.UndoLogRecord;
-import org.h2.expression.Comparison;
-import org.h2.expression.ConditionAndOr;
 import org.h2.expression.Expression;
 import org.h2.expression.ExpressionColumn;
+import org.h2.expression.ExpressionVisitor;
 import org.h2.expression.Parameter;
 import org.h2.expression.ValueExpression;
+import org.h2.expression.condition.Comparison;
+import org.h2.expression.condition.ConditionAndOr;
 import org.h2.index.Index;
-import org.h2.index.PageDataIndex;
 import org.h2.message.DbException;
 import org.h2.mvstore.db.MVPrimaryIndex;
+import org.h2.pagestore.db.PageDataIndex;
 import org.h2.result.ResultInterface;
 import org.h2.result.ResultTarget;
 import org.h2.result.Row;
 import org.h2.table.Column;
+import org.h2.table.DataChangeDeltaTable;
+import org.h2.table.DataChangeDeltaTable.ResultOption;
 import org.h2.table.Table;
-import org.h2.table.TableFilter;
-import org.h2.util.StatementBuilder;
-import org.h2.util.Utils;
+import org.h2.util.HasSQL;
 import org.h2.value.Value;
-import org.h2.value.ValueNull;
 
 /**
  * This class represents the statement
  * INSERT
  */
-public class Insert extends Prepared implements ResultTarget {
+public final class Insert extends CommandWithValues implements ResultTarget {
 
     private Table table;
     private Column[] columns;
-    private final ArrayList<Expression[]> list = Utils.newSmallArrayList();
     private Query query;
     private boolean sortedInsertMode;
-    private int rowNumber;
+    private long rowNumber;
     private boolean insertFromSelect;
-    /**
-     * This table filter is for MERGE..USING support - not used in stand-alone DML
-     */
-    private TableFilter sourceTableFilter;
+
+    private Boolean overridingSystem;
 
     /**
      * For MySQL-style INSERT ... ON DUPLICATE KEY UPDATE ....
      */
     private HashMap<Column, Expression> duplicateKeyAssignmentMap;
 
+    private Value[] onDuplicateKeyRow;
+
     /**
-     * For MySQL-style INSERT IGNORE
+     * For MySQL-style INSERT IGNORE and PostgreSQL-style ON CONFLICT DO
+     * NOTHING.
      */
     private boolean ignore;
 
-    public Insert(Session session) {
+    private ResultTarget deltaChangeCollector;
+
+    private ResultOption deltaChangeCollectionMode;
+
+    public Insert(SessionLocal session) {
         super(session);
     }
 
@@ -79,6 +83,11 @@ public class Insert extends Prepared implements ResultTarget {
         }
     }
 
+    @Override
+    public Table getTable() {
+        return table;
+    }
+
     public void setTable(Table table) {
         this.table = table;
     }
@@ -88,8 +97,10 @@ public class Insert extends Prepared implements ResultTarget {
     }
 
     /**
-     * Sets MySQL-style INSERT IGNORE mode
-     * @param ignore ignore errors
+     * Sets MySQL-style INSERT IGNORE mode or PostgreSQL-style ON CONFLICT
+     * DO NOTHING.
+     *
+     * @param ignore ignore duplicates
      */
     public void setIgnore(boolean ignore) {
         this.ignore = ignore;
@@ -97,6 +108,10 @@ public class Insert extends Prepared implements ResultTarget {
 
     public void setQuery(Query query) {
         this.query = query;
+    }
+
+    public void setOverridingSystem(Boolean overridingSystem) {
+        this.overridingSystem = overridingSystem;
     }
 
     /**
@@ -110,76 +125,69 @@ public class Insert extends Prepared implements ResultTarget {
         if (duplicateKeyAssignmentMap == null) {
             duplicateKeyAssignmentMap = new HashMap<>();
         }
-        if (duplicateKeyAssignmentMap.containsKey(column)) {
-            throw DbException.get(ErrorCode.DUPLICATE_COLUMN_NAME_1,
-                    column.getName());
+        if (duplicateKeyAssignmentMap.putIfAbsent(column, expression) != null) {
+            throw DbException.get(ErrorCode.DUPLICATE_COLUMN_NAME_1, column.getName());
         }
-        duplicateKeyAssignmentMap.put(column, expression);
-    }
-
-    /**
-     * Add a row to this merge statement.
-     *
-     * @param expr the list of values
-     */
-    public void addRow(Expression[] expr) {
-        list.add(expr);
     }
 
     @Override
-    public int update() {
+    public long update(ResultTarget deltaChangeCollector, ResultOption deltaChangeCollectionMode) {
         Index index = null;
-        if (sortedInsertMode) {
-            index = table.getScanIndex(session);
-            index.setSortedInsertMode(true);
-        }
+        this.deltaChangeCollector = deltaChangeCollector;
+        this.deltaChangeCollectionMode = deltaChangeCollectionMode;
         try {
+            if (sortedInsertMode) {
+                if (!session.getDatabase().isMVStore()) {
+                    /*
+                     * Take exclusive lock, otherwise two different inserts running at
+                     * the same time, the second might accidentally get
+                     * sorted-insert-mode.
+                     */
+                    table.lock(session, /* exclusive */true, /* forceLockEvenInMvcc */true);
+                    index = table.getScanIndex(session);
+                    index.setSortedInsertMode(true);
+                }
+            }
             return insertRows();
         } finally {
+            this.deltaChangeCollector = null;
+            this.deltaChangeCollectionMode = null;
             if (index != null) {
                 index.setSortedInsertMode(false);
             }
         }
     }
 
-    private int insertRows() {
-        session.getUser().checkRight(table, Right.INSERT);
+    private long insertRows() {
+        session.getUser().checkTableRight(table, Right.INSERT);
         setCurrentRowNumber(0);
         table.fire(session, Trigger.INSERT, true);
         rowNumber = 0;
-        GeneratedKeys generatedKeys = session.getGeneratedKeys();
-        generatedKeys.initialize(table);
-        int listSize = list.size();
+        int listSize = valuesExpressionList.size();
         if (listSize > 0) {
-            Mode mode = session.getDatabase().getMode();
             int columnLen = columns.length;
             for (int x = 0; x < listSize; x++) {
-                generatedKeys.nextRow();
                 Row newRow = table.getTemplateRow();
-                Expression[] expr = list.get(x);
+                Expression[] expr = valuesExpressionList.get(x);
                 setCurrentRowNumber(x + 1);
                 for (int i = 0; i < columnLen; i++) {
                     Column c = columns[i];
                     int index = c.getColumnId();
                     Expression e = expr[i];
-                    if (e != null) {
-                        // e can be null (DEFAULT)
-                        e = e.optimize(session);
+                    if (e != ValueExpression.DEFAULT) {
                         try {
-                            Value v = c.convert(e.getValue(session), mode);
-                            newRow.setValue(index, v);
-                            if (e.isGeneratedKey()) {
-                                generatedKeys.add(c);
-                            }
+                            newRow.setValue(index, e.getValue(session));
                         } catch (DbException ex) {
-                            throw setRow(ex, x, getSQL(expr));
+                            throw setRow(ex, x, getSimpleSQL(expr));
                         }
                     }
                 }
                 rowNumber++;
-                table.validateConvertUpdateSequence(session, newRow);
-                boolean done = table.fireBeforeRow(session, null, newRow);
-                if (!done) {
+                table.convertInsertRow(session, newRow, overridingSystem);
+                if (deltaChangeCollectionMode == ResultOption.NEW) {
+                    deltaChangeCollector.addRow(newRow.getValueList().clone());
+                }
+                if (!table.fireBeforeRow(session, null, newRow)) {
                     table.lock(session, true, false);
                     try {
                         table.addRow(session, newRow);
@@ -194,9 +202,13 @@ public class Insert extends Prepared implements ResultTarget {
                         }
                         continue;
                     }
-                    generatedKeys.confirmRow(newRow);
+                    DataChangeDeltaTable.collectInsertedFinalRow(session, table, deltaChangeCollector,
+                            deltaChangeCollectionMode, newRow);
                     session.log(table, UndoLogRecord.INSERT, newRow);
                     table.fireAfterRow(session, null, newRow, false);
+                } else {
+                    DataChangeDeltaTable.collectInsertedFinalRow(session, table, deltaChangeCollector,
+                            deltaChangeCollectionMode, newRow);
                 }
             }
         } else {
@@ -206,13 +218,9 @@ public class Insert extends Prepared implements ResultTarget {
             } else {
                 ResultInterface rows = query.query(0);
                 while (rows.next()) {
-                    generatedKeys.nextRow();
                     Value[] r = rows.currentRow();
                     try {
-                        Row newRow = addRowImpl(r);
-                        if (newRow != null) {
-                            generatedKeys.confirmRow(newRow);
-                        }
+                        addRow(r);
                     } catch (DbException de) {
                         if (handleOnDuplicate(de, r)) {
                             // MySQL returns 2 for updated row
@@ -232,37 +240,31 @@ public class Insert extends Prepared implements ResultTarget {
     }
 
     @Override
-    public void addRow(Value[] values) {
-        addRowImpl(values);
-    }
-
-    private Row addRowImpl(Value[] values) {
+    public void addRow(Value... values) {
         Row newRow = table.getTemplateRow();
         setCurrentRowNumber(++rowNumber);
-        Mode mode = session.getDatabase().getMode();
         for (int j = 0, len = columns.length; j < len; j++) {
-            Column c = columns[j];
-            int index = c.getColumnId();
-            try {
-                Value v = c.convert(values[j], mode);
-                newRow.setValue(index, v);
-            } catch (DbException ex) {
-                throw setRow(ex, rowNumber, getSQL(values));
-            }
+            newRow.setValue(columns[j].getColumnId(), values[j]);
         }
-        table.validateConvertUpdateSequence(session, newRow);
-        boolean done = table.fireBeforeRow(session, null, newRow);
-        if (!done) {
+        table.convertInsertRow(session, newRow, overridingSystem);
+        if (deltaChangeCollectionMode == ResultOption.NEW) {
+            deltaChangeCollector.addRow(newRow.getValueList().clone());
+        }
+        if (!table.fireBeforeRow(session, null, newRow)) {
             table.addRow(session, newRow);
+            DataChangeDeltaTable.collectInsertedFinalRow(session, table, deltaChangeCollector,
+                    deltaChangeCollectionMode, newRow);
             session.log(table, UndoLogRecord.INSERT, newRow);
             table.fireAfterRow(session, null, newRow, false);
-            return newRow;
+        } else {
+            DataChangeDeltaTable.collectInsertedFinalRow(session, table, deltaChangeCollector,
+                    deltaChangeCollectionMode, newRow);
         }
-        return null;
     }
 
     @Override
-    public int getRowCount() {
+    public long getRowCount() {
+        // This method is not used in this class
         return rowNumber;
     }
 
@@ -272,69 +274,53 @@ public class Insert extends Prepared implements ResultTarget {
     }
 
     @Override
-    public String getPlanSQL() {
-        StatementBuilder buff = new StatementBuilder("INSERT INTO ");
-        buff.append(table.getSQL()).append('(');
-        for (Column c : columns) {
-            buff.appendExceptFirst(", ");
-            buff.append(c.getSQL());
-        }
-        buff.append(")\n");
+    public String getPlanSQL(int sqlFlags) {
+        StringBuilder builder = new StringBuilder("INSERT INTO ");
+        table.getSQL(builder, sqlFlags).append('(');
+        Column.writeColumns(builder, columns, sqlFlags);
+        builder.append(")\n");
         if (insertFromSelect) {
-            buff.append("DIRECT ");
+            builder.append("DIRECT ");
         }
         if (sortedInsertMode) {
-            buff.append("SORTED ");
+            builder.append("SORTED ");
         }
-        if (!list.isEmpty()) {
-            buff.append("VALUES ");
+        if (!valuesExpressionList.isEmpty()) {
+            builder.append("VALUES ");
             int row = 0;
-            if (list.size() > 1) {
-                buff.append('\n');
+            if (valuesExpressionList.size() > 1) {
+                builder.append('\n');
             }
-            for (Expression[] expr : list) {
+            for (Expression[] expr : valuesExpressionList) {
                 if (row++ > 0) {
-                    buff.append(",\n");
+                    builder.append(",\n");
                 }
-                buff.append('(');
-                buff.resetCount();
-                for (Expression e : expr) {
-                    buff.appendExceptFirst(", ");
-                    if (e == null) {
-                        buff.append("DEFAULT");
-                    } else {
-                        buff.append(e.getSQL());
-                    }
-                }
-                buff.append(')');
+                Expression.writeExpressions(builder.append('('), expr, sqlFlags).append(')');
             }
         } else {
-            buff.append(query.getPlanSQL());
+            builder.append(query.getPlanSQL(sqlFlags));
         }
-        return buff.toString();
+        return builder.toString();
     }
 
     @Override
     public void prepare() {
         if (columns == null) {
-            if (!list.isEmpty() && list.get(0).length == 0) {
+            if (!valuesExpressionList.isEmpty() && valuesExpressionList.get(0).length == 0) {
                 // special case where table is used as a sequence
                 columns = new Column[0];
             } else {
                 columns = table.getColumns();
             }
         }
-        if (!list.isEmpty()) {
-            for (Expression[] expr : list) {
+        if (!valuesExpressionList.isEmpty()) {
+            for (Expression[] expr : valuesExpressionList) {
                 if (expr.length != columns.length) {
                     throw DbException.get(ErrorCode.COLUMN_COUNT_DOES_NOT_MATCH);
                 }
                 for (int i = 0, len = expr.length; i < len; i++) {
                     Expression e = expr[i];
                     if (e != null) {
-                        if(sourceTableFilter!=null){
-                            e.mapColumns(sourceTableFilter, 0, Expression.MAP_INITIAL);
-                        }
                         e = e.optimize(session);
                         if (e instanceof Parameter) {
                             Parameter p = (Parameter) e;
@@ -345,6 +331,9 @@ public class Insert extends Prepared implements ResultTarget {
                 }
             }
         } else {
+            if (!session.getDatabase().isMVStore()) {
+                query.setNeverLazy(true);
+            }
             query.prepare();
             if (query.getColumnCount() != columns.length) {
                 throw DbException.get(ErrorCode.COLUMN_COUNT_DOES_NOT_MATCH);
@@ -371,14 +360,18 @@ public class Insert extends Prepared implements ResultTarget {
         return CommandInterface.INSERT;
     }
 
+    @Override
+    public String getStatementName() {
+        return "INSERT";
+    }
+
     public void setInsertFromSelect(boolean value) {
         this.insertFromSelect = value;
     }
 
     @Override
     public boolean isCacheable() {
-        return duplicateKeyAssignmentMap == null ||
-                duplicateKeyAssignmentMap.isEmpty();
+        return duplicateKeyAssignmentMap == null;
     }
 
     /**
@@ -390,22 +383,18 @@ public class Insert extends Prepared implements ResultTarget {
         if (de.getErrorCode() != ErrorCode.DUPLICATE_KEY_1) {
             throw de;
         }
-        if (duplicateKeyAssignmentMap == null ||
-                duplicateKeyAssignmentMap.isEmpty()) {
+        if (duplicateKeyAssignmentMap == null) {
             if (ignore) {
                 return false;
             }
             throw de;
         }
 
-        ArrayList<String> variableNames = new ArrayList<>(
-                duplicateKeyAssignmentMap.size());
-        Expression[] row = (currentRow == null) ? list.get(getCurrentRowNumber() - 1)
-                : new Expression[columns.length];
-        for (int i = 0; i < columns.length; i++) {
-            String key = table.getSchema().getName() + "." +
-                    table.getName() + "." + columns[i].getName();
-            variableNames.add(key);
+        int columnCount = columns.length;
+        Expression[] row = (currentRow == null) ? valuesExpressionList.get((int) getCurrentRowNumber() - 1)
+                : new Expression[columnCount];
+        onDuplicateKeyRow = new Value[table.getColumns().length];
+        for (int i = 0; i < columnCount; i++) {
             Value value;
             if (currentRow != null) {
                 value = currentRow[i];
@@ -413,34 +402,36 @@ public class Insert extends Prepared implements ResultTarget {
             } else {
                 value = row[i].getValue(session);
             }
-            session.setVariable(key, value);
+            onDuplicateKeyRow[columns[i].getColumnId()] = value;
         }
 
-        StatementBuilder buff = new StatementBuilder("UPDATE ");
-        buff.append(table.getSQL()).append(" SET ");
-        for (Column column : duplicateKeyAssignmentMap.keySet()) {
-            buff.appendExceptFirst(", ");
-            Expression ex = duplicateKeyAssignmentMap.get(column);
-            buff.append(column.getSQL()).append('=').append(ex.getSQL());
+        StringBuilder builder = new StringBuilder("UPDATE ");
+        table.getSQL(builder, HasSQL.DEFAULT_SQL_FLAGS).append(" SET ");
+        boolean f = false;
+        for (Entry<Column, Expression> entry : duplicateKeyAssignmentMap.entrySet()) {
+            if (f) {
+                builder.append(", ");
+            }
+            f = true;
+            entry.getKey().getSQL(builder, HasSQL.DEFAULT_SQL_FLAGS).append('=');
+            entry.getValue().getUnenclosedSQL(builder, HasSQL.DEFAULT_SQL_FLAGS);
         }
-        buff.append(" WHERE ");
+        builder.append(" WHERE ");
         Index foundIndex = (Index) de.getSource();
         if (foundIndex == null) {
             throw DbException.getUnsupportedException(
                     "Unable to apply ON DUPLICATE KEY UPDATE, no index found!");
         }
-        buff.append(prepareUpdateCondition(foundIndex, row).getSQL());
-        String sql = buff.toString();
+        prepareUpdateCondition(foundIndex, row).getUnenclosedSQL(builder, HasSQL.DEFAULT_SQL_FLAGS);
+        String sql = builder.toString();
         Update command = (Update) session.prepare(sql);
-        command.setUpdateToCurrentValuesReturnsZero(true);
+        command.setOnDuplicateKeyInsert(this);
         for (Parameter param : command.getParameters()) {
             Parameter insertParam = parameters.get(param.getIndex());
             param.setValue(insertParam.getValue(session));
         }
         boolean result = command.update() > 0;
-        for (String variableName : variableNames) {
-            session.setVariable(variableName, ValueNull.INSTANCE);
-        }
+        onDuplicateKeyRow = null;
         return result;
     }
 
@@ -469,15 +460,14 @@ public class Insert extends Prepared implements ResultTarget {
         Expression condition = null;
         for (Column column : indexedColumns) {
             ExpressionColumn expr = new ExpressionColumn(session.getDatabase(),
-                    table.getSchema().getName(), table.getName(),
-                    column.getName());
+                    table.getSchema().getName(), table.getName(), column.getName());
             for (int i = 0; i < columns.length; i++) {
-                if (expr.getColumnName().equals(columns[i].getName())) {
+                if (expr.getColumnName(session, i).equals(columns[i].getName())) {
                     if (condition == null) {
-                        condition = new Comparison(session, Comparison.EQUAL, expr, row[i]);
+                        condition = new Comparison(Comparison.EQUAL, expr, row[i], false);
                     } else {
                         condition = new ConditionAndOr(ConditionAndOr.AND, condition,
-                                new Comparison(session, Comparison.EQUAL, expr, row[i]));
+                                new Comparison(Comparison.EQUAL, expr, row[i], false));
                     }
                     break;
                 }
@@ -486,8 +476,27 @@ public class Insert extends Prepared implements ResultTarget {
         return condition;
     }
 
-    public void setSourceTableFilter(TableFilter sourceTableFilter) {
-        this.sourceTableFilter = sourceTableFilter;
+    /**
+     * Get the value to use for the specified column in case of a duplicate key.
+     *
+     * @param columnIndex the column index
+     * @return the value
+     */
+    public Value getOnDuplicateKeyValue(int columnIndex) {
+        return onDuplicateKeyRow[columnIndex];
     }
 
+    @Override
+    public void collectDependencies(HashSet<DbObject> dependencies) {
+        ExpressionVisitor visitor = ExpressionVisitor.getDependenciesVisitor(dependencies);
+        if (!valuesExpressionList.isEmpty()) {
+            for (Expression[] expr : valuesExpressionList) {
+                for (Expression e : expr) {
+                    e.isEverything(visitor);
+                }
+            }
+        } else {
+            query.isEverything(visitor);
+        }
+    }
 }

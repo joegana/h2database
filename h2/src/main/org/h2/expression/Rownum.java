@@ -1,87 +1,51 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression;
 
 import org.h2.command.Prepared;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.message.DbException;
-import org.h2.table.ColumnResolver;
-import org.h2.table.TableFilter;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
-import org.h2.value.ValueInt;
+import org.h2.value.ValueBigint;
 
 /**
  * Represents the ROWNUM function.
  */
-public class Rownum extends Expression {
+public final class Rownum extends Operation0 {
 
     private final Prepared prepared;
 
     public Rownum(Prepared prepared) {
         if (prepared == null) {
-            throw DbException.throwInternalError();
+            throw DbException.getInternalError();
         }
         this.prepared = prepared;
     }
 
     @Override
-    public Value getValue(Session session) {
-        return ValueInt.get(prepared.getCurrentRowNumber());
+    public Value getValue(SessionLocal session) {
+        return ValueBigint.get(prepared.getCurrentRowNumber());
     }
 
     @Override
-    public int getType() {
-        return Value.INT;
+    public TypeInfo getType() {
+        return TypeInfo.TYPE_BIGINT;
     }
 
     @Override
-    public void mapColumns(ColumnResolver resolver, int level, int state) {
-        // nothing to do
-    }
-
-    @Override
-    public Expression optimize(Session session) {
-        return this;
-    }
-
-    @Override
-    public void setEvaluatable(TableFilter tableFilter, boolean b) {
-        // nothing to do
-    }
-
-    @Override
-    public int getScale() {
-        return 0;
-    }
-
-    @Override
-    public long getPrecision() {
-        return ValueInt.PRECISION;
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return ValueInt.DISPLAY_SIZE;
-    }
-
-    @Override
-    public String getSQL() {
-        return "ROWNUM()";
-    }
-
-    @Override
-    public void updateAggregate(Session session, int stage) {
-        // nothing to do
+    public StringBuilder getUnenclosedSQL(StringBuilder builder, int sqlFlags) {
+        return builder.append("ROWNUM()");
     }
 
     @Override
     public boolean isEverything(ExpressionVisitor visitor) {
         switch (visitor.getType()) {
         case ExpressionVisitor.QUERY_COMPARABLE:
-        case ExpressionVisitor.OPTIMIZABLE_MIN_MAX_COUNT_ALL:
+        case ExpressionVisitor.OPTIMIZABLE_AGGREGATE:
         case ExpressionVisitor.DETERMINISTIC:
         case ExpressionVisitor.INDEPENDENT:
             return false;
@@ -95,7 +59,7 @@ public class Rownum extends Expression {
             // if everything else is the same, the rownum is the same
             return true;
         default:
-            throw DbException.throwInternalError("type="+visitor.getType());
+            throw DbException.getInternalError("type="+visitor.getType());
         }
     }
 

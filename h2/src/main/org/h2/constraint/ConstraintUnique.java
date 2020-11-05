@@ -1,20 +1,19 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.constraint;
 
+import java.util.ArrayList;
 import java.util.HashSet;
-import org.h2.command.Parser;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.index.Index;
 import org.h2.result.Row;
 import org.h2.schema.Schema;
 import org.h2.table.Column;
 import org.h2.table.IndexColumn;
 import org.h2.table.Table;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
 
 /**
@@ -43,37 +42,34 @@ public class ConstraintUnique extends Constraint {
         return getCreateSQLForCopy(forTable, quotedName, true);
     }
 
-    private String getCreateSQLForCopy(Table forTable, String quotedName,
-            boolean internalIndex) {
-        StatementBuilder buff = new StatementBuilder("ALTER TABLE ");
-        buff.append(forTable.getSQL()).append(" ADD CONSTRAINT ");
+    private String getCreateSQLForCopy(Table forTable, String quotedName, boolean internalIndex) {
+        StringBuilder builder = new StringBuilder("ALTER TABLE ");
+        forTable.getSQL(builder, DEFAULT_SQL_FLAGS).append(" ADD CONSTRAINT ");
         if (forTable.isHidden()) {
-            buff.append("IF NOT EXISTS ");
+            builder.append("IF NOT EXISTS ");
         }
-        buff.append(quotedName);
+        builder.append(quotedName);
         if (comment != null) {
-            buff.append(" COMMENT ").append(StringUtils.quoteStringSQL(comment));
+            builder.append(" COMMENT ");
+            StringUtils.quoteStringSQL(builder, comment);
         }
-        buff.append(' ').append(getConstraintType().getSqlName()).append('(');
-        for (IndexColumn c : columns) {
-            buff.appendExceptFirst(", ");
-            buff.append(Parser.quoteIdentifier(c.column.getName()));
-        }
-        buff.append(')');
+        builder.append(' ').append(getConstraintType().getSqlName()).append('(');
+        IndexColumn.writeColumns(builder, columns, DEFAULT_SQL_FLAGS).append(')');
         if (internalIndex && indexOwner && forTable == this.table) {
-            buff.append(" INDEX ").append(index.getSQL());
+            builder.append(" INDEX ");
+            index.getSQL(builder, DEFAULT_SQL_FLAGS);
         }
-        return buff.toString();
+        return builder.toString();
     }
 
     @Override
     public String getCreateSQLWithoutIndexes() {
-        return getCreateSQLForCopy(table, getSQL(), false);
+        return getCreateSQLForCopy(table, getSQL(DEFAULT_SQL_FLAGS), false);
     }
 
     @Override
     public String getCreateSQL() {
-        return getCreateSQLForCopy(table, getSQL());
+        return getCreateSQLForCopy(table, getSQL(DEFAULT_SQL_FLAGS));
     }
 
     public void setColumns(IndexColumn[] columns) {
@@ -97,7 +93,16 @@ public class ConstraintUnique extends Constraint {
     }
 
     @Override
-    public void removeChildrenAndResources(Session session) {
+    public void removeChildrenAndResources(SessionLocal session) {
+        ArrayList<Constraint> constraints = table.getConstraints();
+        if (constraints != null) {
+            constraints = new ArrayList<>(table.getConstraints());
+            for (Constraint c : constraints) {
+                if (c.getReferencedConstraint() == this) {
+                    database.removeSchemaObject(session, c);
+                }
+            }
+        }
         table.removeConstraint(this);
         if (indexOwner) {
             table.removeIndexOrTransferOwnership(session, index);
@@ -110,7 +115,7 @@ public class ConstraintUnique extends Constraint {
     }
 
     @Override
-    public void checkRow(Session session, Table t, Row oldRow, Row newRow) {
+    public void checkRow(SessionLocal session, Table t, Row oldRow, Row newRow) {
         // unique index check is enough
     }
 
@@ -139,13 +144,13 @@ public class ConstraintUnique extends Constraint {
     }
 
     @Override
-    public void checkExistingData(Session session) {
+    public void checkExistingData(SessionLocal session) {
         // no need to check: when creating the unique index any problems are
         // found
     }
 
     @Override
-    public Index getUniqueIndex() {
+    public Index getIndex() {
         return index;
     }
 

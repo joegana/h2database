@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.util.geometry;
@@ -52,7 +52,8 @@ public final class GeometryUtils {
         }
 
         /**
-         * Invoked before writing a POLYGON.
+         * Invoked before writing a POLYGON. If polygon is empty, both
+         * parameters are 0.
          *
          * @param numInner
          *            number of inner polygons
@@ -114,21 +115,23 @@ public final class GeometryUtils {
          *
          * @param target
          *            the result of {@link #startCollectionItem(int, int)}
+         * @param type
+         *            type of collection
          * @param index
          *            0-based index of this item in the collection
          * @param total
          *            total number of items in the collection
          */
-        protected void endCollectionItem(Target target, int index, int total) {
+        protected void endCollectionItem(Target target, int type, int index, int total) {
         }
 
         /**
-         * Invoked after writing of a collection.
+         * Invoked after writing of the object.
          *
          * @param type
-         *            type of collection, see {@link #startCollection(int, int)}
+         *            type of the object
          */
-        protected void endCollection(int type) {
+        protected void endObject(int type) {
         }
 
         /**
@@ -167,7 +170,7 @@ public final class GeometryUtils {
          */
         private boolean set;
 
-        double minX, maxX, minY, maxY;
+        private double minX, maxX, minY, maxY;
 
         /**
          * Creates a new envelope calculation target.
@@ -295,7 +298,7 @@ public final class GeometryUtils {
          */
         private boolean set;
 
-        double minX, maxX, minY, maxY;
+        private double minX, maxX, minY, maxY;
 
         private boolean hasZ;
 
@@ -567,6 +570,13 @@ public final class GeometryUtils {
         return Double.isNaN(d) ? Double.NaN : d == 0d ? 0d : d;
     }
 
+    /**
+     * Throw exception if param is not finite value (ie. NaN/inf/etc)
+     *
+     * @param d
+     *            a double value
+     * @return the same double value
+     */
     static double checkFinite(double d) {
         // Do not push this negation down, it will break NaN rejection
         if (!(Math.abs(d) <= Double.MAX_VALUE)) {

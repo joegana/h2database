@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.db;
@@ -13,6 +13,7 @@ import java.sql.Statement;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
+import org.h2.api.ErrorCode;
 import org.h2.test.TestBase;
 import org.h2.test.TestDb;
 import org.h2.util.Utils;
@@ -30,7 +31,7 @@ public class TestMemoryUsage extends TestDb {
      * @param a ignored
      */
     public static void main(String... a) throws Exception {
-        TestBase.createCaller().init().test();
+        TestBase.createCaller().init().testFromMain();
     }
 
     @Override
@@ -62,7 +63,8 @@ public class TestMemoryUsage extends TestDb {
             return;
         }
         deleteDb("memoryUsage");
-        conn = getConnection("memoryUsage");
+        // to eliminate background thread interference
+        conn = getConnection("memoryUsage;WRITE_DELAY=0");
         try {
             eatMemory(4000);
             for (int i = 0; i < 4000; i++) {
@@ -72,7 +74,7 @@ public class TestMemoryUsage extends TestDb {
             }
         } finally {
             freeMemory();
-            conn.close();
+            closeConnection(conn);
         }
     }
 
@@ -85,13 +87,13 @@ public class TestMemoryUsage extends TestDb {
             stat.execute("DROP TABLE TEST");
         }
         stat.execute("checkpoint");
-        int used = Utils.getMemoryUsed();
+        long used = Utils.getMemoryUsed();
         for (int i = 0; i < 1000; i++) {
             stat.execute("CREATE TABLE TEST(ID INT PRIMARY KEY)");
             stat.execute("DROP TABLE TEST");
         }
         stat.execute("checkpoint");
-        int usedNow = Utils.getMemoryUsed();
+        long usedNow = Utils.getMemoryUsed();
         if (usedNow > used * 1.3) {
             // try to lower memory usage (because it might be wrong)
             // by forcing OOME
@@ -126,41 +128,42 @@ public class TestMemoryUsage extends TestDb {
             return;
         }
         deleteDb("memoryUsageClob");
-        conn = getConnection("memoryUsageClob");
+        conn = getConnection("memoryUsageClob;WRITE_DELAY=0");
         Statement stat = conn.createStatement();
         stat.execute("SET MAX_LENGTH_INPLACE_LOB 8192");
         stat.execute("SET CACHE_SIZE 8000");
         stat.execute("CREATE TABLE TEST(ID IDENTITY, DATA CLOB)");
-        freeSoftReferences();
         try {
-            int base = Utils.getMemoryUsed();
+            long base = Utils.getMemoryUsed();
             for (int i = 0; i < 4; i++) {
                 stat.execute("INSERT INTO TEST(DATA) " +
                         "SELECT SPACE(8000) FROM SYSTEM_RANGE(1, 800)");
-                freeSoftReferences();
-                int used = Utils.getMemoryUsed();
+                long used = Utils.getMemoryUsed();
                 if ((used - base) > 3 * 8192) {
                     fail("Used: " + (used - base) + " i: " + i);
                 }
             }
         } finally {
             freeMemory();
-            conn.close();
+            closeConnection(conn);
         }
     }
 
     /**
-     * Eat memory so that all soft references are garbage collected.
+     * Closes the specified connection. It silently consumes OUT_OF_MEMORY that
+     * may happen in background thread during the tests.
+     *
+     * @param conn connection to close
+     * @throws SQLException on other SQL exception
      */
-    void freeSoftReferences() {
+    private static void closeConnection(Connection conn) throws SQLException {
         try {
-            eatMemory(1);
-        } catch (OutOfMemoryError e) {
-            // ignore
+            conn.close();
+        } catch (SQLException e) {
+            if (e.getErrorCode() != ErrorCode.OUT_OF_MEMORY) {
+                throw e;
+            }
         }
-        System.gc();
-        System.gc();
-        freeMemory();
     }
 
     private void testCreateIndex() throws SQLException {
@@ -182,11 +185,11 @@ public class TestMemoryUsage extends TestDb {
             prep.setInt(1, i);
             prep.executeUpdate();
         }
-        int base = Utils.getMemoryUsed();
+        long base = Utils.getMemoryUsed();
         stat.execute("create index idx_test_id on test(id)");
         for (int i = 0;; i++) {
             System.gc();
-            int used = Utils.getMemoryUsed() - base;
+            long used = Utils.getMemoryUsed() - base;
             if (used <= getSize(7500, 12000)) {
                 break;
             }

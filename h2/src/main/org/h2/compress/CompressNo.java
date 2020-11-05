@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.compress;
@@ -23,8 +23,8 @@ public class CompressNo implements Compressor {
     }
 
     @Override
-    public int compress(byte[] in, int inLen, byte[] out, int outPos) {
-        System.arraycopy(in, 0, out, outPos, inLen);
+    public int compress(byte[] in, int inPos, int inLen, byte[] out, int outPos) {
+        System.arraycopy(in, inPos, out, outPos, inLen);
         return outPos + inLen;
     }
 

@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.db;
@@ -9,9 +9,9 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import org.h2.api.ErrorCode;
 import org.h2.test.TestBase;
 import org.h2.test.TestDb;
-import org.h2.api.ErrorCode;
 
 /**
  * Test the impact of ALTER TABLE statements on views.
@@ -27,7 +27,7 @@ public class TestViewAlterTable extends TestDb {
      * @param a ignored
      */
     public static void main(String... a) throws Exception {
-        TestBase.createCaller().init().test();
+        TestBase.createCaller().init().testFromMain();
     }
 
     @Override
@@ -46,6 +46,7 @@ public class TestViewAlterTable extends TestDb {
         testJoinAndAlias();
         testSubSelect();
         testForeignKey();
+        testAlterTableDropColumnInViewWithDoubleQuotes();
 
         conn.close();
         deleteDb(getTestName());
@@ -71,9 +72,9 @@ public class TestViewAlterTable extends TestDb {
     private void testAlterTableDropColumnInView() throws SQLException {
         // simple
         stat.execute("create table test(id identity, name varchar) " +
-                "as select x, 'Hello'");
+                "as select 1, 'Hello' from dual");
         stat.execute("create view test_view as select * from test");
-        assertThrows(ErrorCode.VIEW_IS_INVALID_2, stat).
+        assertThrows(ErrorCode.COLUMN_IS_REFERENCED_1, stat).
                 execute("alter table test drop name");
         ResultSet rs = stat.executeQuery("select * from test_view");
         assertTrue(rs.next());
@@ -83,7 +84,7 @@ public class TestViewAlterTable extends TestDb {
         // nested
         createTestData();
         // should throw exception because V1 uses column A
-        assertThrows(ErrorCode.VIEW_IS_INVALID_2, stat).
+        assertThrows(ErrorCode.COLUMN_IS_REFERENCED_1, stat).
                 execute("alter table test drop column a");
         stat.execute("drop table test cascade");
     }
@@ -196,5 +197,19 @@ public class TestViewAlterTable extends TestDb {
                     "INFORMATION_SCHEMA", rs.getString(2));
         }
 
+    }
+
+    // original error: table "XX_COPY_xx_xx" not found
+    private void testAlterTableDropColumnInViewWithDoubleQuotes() throws SQLException{
+        // simple
+        stat.execute("create table \"test\"(id identity, name varchar) " +
+                "as select 1, 'Hello' from dual");
+        stat.execute("create view test_view as select * from \"test\"");
+        assertThrows(ErrorCode.COLUMN_IS_REFERENCED_1, stat).
+                execute("alter table \"test\" drop name");
+        ResultSet rs = stat.executeQuery("select * from test_view");
+        assertTrue(rs.next());
+        stat.execute("drop view test_view");
+        stat.execute("drop table \"test\"");
     }
 }

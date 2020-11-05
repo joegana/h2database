@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.db;
@@ -23,9 +23,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.sql.Statement;
+import java.sql.Types;
+import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import org.h2.api.ErrorCode;
+import org.h2.engine.Constants;
 import org.h2.engine.SysProperties;
 import org.h2.jdbc.JdbcConnection;
 import org.h2.message.DbException;
@@ -33,10 +36,13 @@ import org.h2.store.fs.FileUtils;
 import org.h2.test.TestBase;
 import org.h2.test.TestDb;
 import org.h2.tools.Recover;
+import org.h2.tools.SimpleResultSet;
 import org.h2.util.IOUtils;
 import org.h2.util.JdbcUtils;
 import org.h2.util.StringUtils;
 import org.h2.util.Task;
+import org.h2.value.Value;
+import org.h2.value.ValueLobInMemory;
 
 /**
  * Tests LOB and CLOB data types.
@@ -57,7 +63,7 @@ public class TestLob extends TestDb {
         TestBase test = TestBase.createCaller().init();
         test.config.big = true;
         test.config.mvStore = false;
-        test.test();
+        test.testFromMain();
     }
 
     @Override
@@ -114,6 +120,8 @@ public class TestLob extends TestDb {
         testLob(true);
         testJavaObject();
         testLobGrowth();
+        testLobInValueResultSet();
+        testLimits();
         deleteDb("lob");
     }
 
@@ -268,7 +276,7 @@ public class TestLob extends TestDb {
         Statement stat = conn.createStatement();
         stat.execute("create table test(id identity, data clob)");
         PreparedStatement prep = conn.prepareStatement(
-                "insert into test values(null, ?)");
+                "insert into test(data) values ?");
         byte[] data = new byte[256];
         Random r = new Random(1);
         for (int i = 0; i < 1000; i++) {
@@ -521,14 +529,14 @@ public class TestLob extends TestDb {
         Statement stat = conn.createStatement();
         stat.execute("create cached table test(id int not null identity, " +
                 "name clob, counter int)");
-        stat.execute("insert into test(id, name) select x, space(100000) " +
+        stat.execute("insert into test(name) select space(100000) " +
                 "from system_range(1, 100)");
         Deadlock2Task1 task1 = new Deadlock2Task1();
         Deadlock2Task2 task2 = new Deadlock2Task2();
         task1.execute("task1");
         task2.execute("task2");
         for (int i = 0; i < 100; i++) {
-            stat.execute("insert into test values(null, space(10000 + " + i + "), 1)");
+            stat.execute("insert into test(name, counter) values(space(10000 + " + i + "), 1)");
         }
         task1.get();
         task1.conn.close();
@@ -538,19 +546,19 @@ public class TestLob extends TestDb {
     }
 
     Connection getDeadlock2Connection() throws SQLException {
-        return getConnection("lob;MULTI_THREADED=TRUE;LOCK_TIMEOUT=60000");
+        return getConnection("lob;LOCK_TIMEOUT=60000");
     }
 
     private void testCopyManyLobs() throws Exception {
         deleteDb("lob");
         Connection conn = getConnection("lob");
         Statement stat = conn.createStatement();
-        stat.execute("create table test(id identity, data clob) " +
-                "as select 1, space(10000)");
-        stat.execute("insert into test(id, data) select null, data from test");
-        stat.execute("insert into test(id, data) select null, data from test");
-        stat.execute("insert into test(id, data) select null, data from test");
-        stat.execute("insert into test(id, data) select null, data from test");
+        stat.execute("create table test(id identity default on null, data clob) " +
+                "as select null, space(10000)");
+        stat.execute("insert into test(data) select data from test");
+        stat.execute("insert into test(data) select data from test");
+        stat.execute("insert into test(data) select data from test");
+        stat.execute("insert into test(data) select data from test");
         stat.execute("delete from test where id < 10");
         stat.execute("shutdown compact");
         conn.close();
@@ -1124,8 +1132,8 @@ public class TestLob extends TestDb {
         conn = reconnect(conn);
         stat = conn.createStatement();
         ResultSet rs;
-        rs = stat.executeQuery("select value from information_schema.settings " +
-                "where NAME='COMPRESS_LOB'");
+        rs = stat.executeQuery(
+                "SELECT SETTING_VALUE FROM INFORMATION_SCHEMA.SETTINGS WHERE SETTING_NAME = 'COMPRESS_LOB'");
         rs.next();
         assertEquals(compress ? "LZF" : "NO", rs.getString(1));
         assertFalse(rs.next());
@@ -1419,7 +1427,7 @@ public class TestLob extends TestDb {
         PreparedStatement prep;
         ResultSet rs;
         long time;
-        stat.execute("CREATE TABLE TEST(ID INT PRIMARY KEY, VALUE " +
+        stat.execute("CREATE TABLE TEST(ID INT PRIMARY KEY, V " +
                 (clob ? "CLOB" : "BLOB") + ")");
 
         int len = getSize(1, 1000);
@@ -1444,7 +1452,7 @@ public class TestLob extends TestDb {
         conn = reconnect(conn);
 
         time = System.nanoTime();
-        prep = conn.prepareStatement("SELECT ID, VALUE FROM TEST");
+        prep = conn.prepareStatement("SELECT ID, V FROM TEST");
         rs = prep.executeQuery();
         while (rs.next()) {
             int id = rs.getInt("ID");
@@ -1525,13 +1533,13 @@ public class TestLob extends TestDb {
         assertFalse(rs.next());
 
         conn.createStatement().execute("drop table test");
-        stat.execute("create table test(value other)");
+        stat.execute("create table test(v other)");
         prep = conn.prepareStatement("insert into test values(?)");
-        prep.setObject(1, JdbcUtils.serialize("", conn.getSession().getDataHandler()));
+        prep.setObject(1, JdbcUtils.serialize("", conn.getJavaObjectSerializer()));
         prep.execute();
-        rs = stat.executeQuery("select value from test");
+        rs = stat.executeQuery("select v from test");
         while (rs.next()) {
-            assertEquals("", (String) rs.getObject("value"));
+            assertEquals("", (String) rs.getObject("v"));
         }
         conn.close();
     }
@@ -1633,7 +1641,7 @@ public class TestLob extends TestDb {
         stat.execute("CREATE TABLE logs" +
                 "(id int primary key auto_increment, message CLOB)");
         PreparedStatement s1 = conn.prepareStatement(
-                "INSERT INTO logs (id, message) VALUES(null, ?)");
+                "INSERT INTO logs (message) VALUES ?");
         final Random rand = new Random(1);
         for (int i = 1; i <= 100; i++) {
             String data = randomUnicodeString(rand);
@@ -1720,4 +1728,119 @@ public class TestLob extends TestDb {
         conn.createStatement().execute("drop table test");
         conn.close();
     }
+
+    private void testLobInValueResultSet() throws SQLException {
+        deleteDb("lob");
+        JdbcConnection conn = (JdbcConnection) getConnection("lob");
+        Statement stat = conn.createStatement();
+        stat.execute("CREATE ALIAS VRS FOR '" + getClass().getName() + ".testLobInValueResultSetGet'");
+        ResultSet rs = stat.executeQuery("SELECT * FROM VRS()");
+        assertTrue(rs.next());
+        Clob clob = rs.getClob(1);
+        assertFalse(rs.next());
+        assertEquals(MORE_THAN_128_CHARS, clob.getSubString(1, Integer.MAX_VALUE));
+        conn.close();
+    }
+
+    /**
+     * This method is called via reflection from the database.
+     *
+     * @param conn connection
+     * @return the result set
+     * @throws SQLException on exception
+     */
+    public static SimpleResultSet testLobInValueResultSetGet(Connection conn) throws SQLException {
+        final Clob c = conn.createClob();
+        c.setString(1, MORE_THAN_128_CHARS);
+        SimpleResultSet rs = new SimpleResultSet() {
+            @Override
+            public Object getObject(int columnIndex) throws SQLException {
+                return c;
+            }
+        };
+        rs.addColumn("L", Types.CLOB, 1000, 0);
+        rs.addRow(MORE_THAN_128_CHARS);
+        return rs;
+    }
+
+    private void testLimits() throws Exception {
+        deleteDb("lob");
+        JdbcConnection conn = (JdbcConnection) getConnection("lob");
+        Statement stat = conn.createStatement();
+        stat.execute("CREATE TABLE TEST(ID INTEGER, B BLOB, C CLOB)");
+        PreparedStatement ps = conn.prepareStatement("INSERT INTO TEST VALUES (?, ?, ?)");
+        ps.setInt(1, 1);
+        byte[] b = new byte[Constants.MAX_STRING_LENGTH];
+        Arrays.fill(b, (byte) 'A');
+        String s = new String(b, StandardCharsets.UTF_8);
+        ps.setBytes(2, b);
+        ps.setString(3, s);
+        ps.executeUpdate();
+        byte[] b2 = new byte[Constants.MAX_STRING_LENGTH + 1];
+        Arrays.fill(b2, (byte) 'A');
+        String s2 = new String(b2, StandardCharsets.UTF_8);
+        assertThrows(ErrorCode.VALUE_TOO_LONG_2, ps).setBytes(2, b2);
+        ps.setBinaryStream(2, new ByteArrayInputStream(b2));
+        assertThrows(ErrorCode.VALUE_TOO_LONG_2, ps).setString(3, s2);
+        ps.setCharacterStream(3, new StringReader(s2));
+        ps.executeUpdate();
+        try (ResultSet rs = stat.executeQuery("TABLE TEST ORDER BY ID")) {
+            assertTrue(rs.next());
+            assertEquals(1, rs.getInt(1));
+            testLimitsSmall(b, s, rs, 2);
+            testLimitsSmall(b, s, rs, 2);
+            testLimitsSmall(b, s, rs, 3);
+            testLimitsSmall(b, s, rs, 3);
+            assertTrue(rs.next());
+            assertEquals(1, rs.getInt(1));
+            testLimitsLarge(b2, s2, rs, 2);
+            testLimitsLarge(b2, s2, rs, 2);
+            testLimitsLarge(b2, s2, rs, 3);
+            testLimitsLarge(b2, s2, rs, 3);
+            assertFalse(rs.next());
+        }
+        conn.close();
+        testLimitsSmall(b, s, ValueLobInMemory.createSmallLob(Value.BLOB, b, Constants.MAX_STRING_LENGTH));
+        testLimitsSmall(b, s, ValueLobInMemory.createSmallLob(Value.CLOB, b, Constants.MAX_STRING_LENGTH));
+        testLimitsLarge(b2, s2, ValueLobInMemory.createSmallLob(Value.BLOB, b2, Constants.MAX_STRING_LENGTH + 1));
+        testLimitsLarge(b2, s2, ValueLobInMemory.createSmallLob(Value.CLOB, b2, Constants.MAX_STRING_LENGTH + 1));
+    }
+
+    private void testLimitsSmall(byte[] b, String s, ResultSet rs, int index) throws SQLException {
+        assertEquals(b, rs.getBytes(index));
+        assertEquals(s, rs.getString(index));
+    }
+
+    private void testLimitsLarge(byte[] b, String s, ResultSet rs, int index) throws SQLException, IOException {
+        assertThrows(ErrorCode.VALUE_TOO_LONG_2, rs).getBytes(index);
+        assertEquals(b, IOUtils.readBytesAndClose(rs.getBlob(index).getBinaryStream(), -1));
+        assertThrows(ErrorCode.VALUE_TOO_LONG_2, rs).getString(index);
+        assertEquals(s, IOUtils.readStringAndClose(rs.getClob(index).getCharacterStream(), -1));
+    }
+
+    private void testLimitsSmall(byte[] b, String s, ValueLobInMemory v) {
+        assertEquals(b, v.getBytesNoCopy());
+        assertEquals(s, v.getString());
+        assertEquals(s, v.getString());
+    }
+
+    private void testLimitsLarge(byte[] b, String s, ValueLobInMemory v) throws IOException {
+        try {
+            assertEquals(b, v.getBytesNoCopy());
+            throw new AssertionError();
+        } catch (DbException e) {
+            assertEquals(ErrorCode.VALUE_TOO_LONG_2, e.getErrorCode());
+        }
+        assertEquals(b, IOUtils.readBytesAndClose(v.getInputStream(), -1));
+        for (int i = 0; i < 2; i++) {
+            try {
+                assertEquals(s, v.getString());
+                throw new AssertionError();
+            } catch (DbException e) {
+                assertEquals(ErrorCode.VALUE_TOO_LONG_2, e.getErrorCode());
+            }
+            assertEquals(s, IOUtils.readStringAndClose(v.getReader(), -1));
+        }
+    }
+
 }

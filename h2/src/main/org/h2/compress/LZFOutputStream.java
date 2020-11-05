@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.compress;
@@ -54,7 +54,7 @@ public class LZFOutputStream extends OutputStream {
     private void compressAndWrite(byte[] buff, int len) throws IOException {
         if (len > 0) {
             ensureOutput(len);
-            int compressed = compress.compress(buff, len, outBuffer, 0);
+            int compressed = compress.compress(buff, 0, len, outBuffer, 0);
             if (compressed > len) {
                 writeInt(-len);
                 out.write(buff, 0, len);

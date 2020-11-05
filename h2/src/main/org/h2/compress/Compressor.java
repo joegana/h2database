@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.compress;
@@ -37,12 +37,13 @@ public interface Compressor {
      * Compress a number of bytes.
      *
      * @param in the input data
+     * @param inPos the offset at the input array
      * @param inLen the number of bytes to compress
      * @param out the output area
      * @param outPos the offset at the output array
      * @return the end position
      */
-    int compress(byte[] in, int inLen, byte[] out, int outPos);
+    int compress(byte[] in, int inPos, int inLen, byte[] out, int outPos);
 
     /**
      * Expand a number of compressed bytes.

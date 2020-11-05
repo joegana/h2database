@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.ddl;
@@ -10,20 +10,16 @@ import java.util.HashSet;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.command.dml.Insert;
-import org.h2.command.dml.Query;
+import org.h2.command.query.Query;
 import org.h2.engine.Database;
 import org.h2.engine.DbObject;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
-import org.h2.expression.ExpressionColumn;
 import org.h2.message.DbException;
 import org.h2.schema.Schema;
 import org.h2.schema.Sequence;
 import org.h2.table.Column;
 import org.h2.table.Table;
-import org.h2.util.ColumnNamer;
-import org.h2.value.DataType;
-import org.h2.value.ExtTypeInfo;
 import org.h2.value.Value;
 
 /**
@@ -41,7 +37,7 @@ public class CreateTable extends CommandWithColumns {
     private boolean sortedInsertMode;
     private boolean withNoData;
 
-    public CreateTable(Session session, Schema schema) {
+    public CreateTable(SessionLocal session, Schema schema) {
         super(session, schema);
         data.persistIndexes = true;
         data.persistData = true;
@@ -64,12 +60,21 @@ public class CreateTable extends CommandWithColumns {
         data.columns.add(column);
     }
 
+    public ArrayList<Column> getColumns() {
+        return data.columns;
+    }
+
     public void setIfNotExists(boolean ifNotExists) {
         this.ifNotExists = ifNotExists;
     }
 
     @Override
-    public int update() {
+    public long update() {
+        Schema schema = getSchema();
+        boolean isSessionTemporary = data.temporary && !data.globalTemporary;
+        if (!isSessionTemporary) {
+            session.getUser().checkSchemaOwner(schema);
+        }
         if (!transactional) {
             session.commit(true);
         }
@@ -77,11 +82,10 @@ public class CreateTable extends CommandWithColumns {
         if (!db.isPersistent()) {
             data.persistIndexes = false;
         }
-        boolean isSessionTemporary = data.temporary && !data.globalTemporary;
         if (!isSessionTemporary) {
             db.lockMeta(session);
         }
-        if (getSchema().resolveTableOrView(session, data.tableName) != null) {
+        if (schema.resolveTableOrView(session, data.tableName) != null) {
             if (ifNotExists) {
                 return 0;
             }
@@ -93,13 +97,21 @@ public class CreateTable extends CommandWithColumns {
                 generateColumnsFromQuery();
             } else if (data.columns.size() != asQuery.getColumnCount()) {
                 throw DbException.get(ErrorCode.COLUMN_COUNT_DOES_NOT_MATCH);
+            } else {
+                ArrayList<Column> columns = data.columns;
+                for (int i = 0; i < columns.size(); i++) {
+                    Column column = columns.get(i);
+                    if (column.getType().getValueType() == Value.UNKNOWN) {
+                        columns.set(i, new Column(column.getName(), asQuery.getExpressions().get(i).getType()));
+                    }
+                }
             }
         }
         changePrimaryKeysToNotNull(data.columns);
         data.id = getObjectId();
         data.create = create;
         data.session = session;
-        Table table = getSchema().createTable(data);
+        Table table = schema.createTable(data);
         ArrayList<Sequence> sequences = generateSequences(data.columns, data.temporary);
         table.setComment(comment);
         if (isSessionTemporary) {
@@ -116,7 +128,7 @@ public class CreateTable extends CommandWithColumns {
         }
         try {
             for (Column c : data.columns) {
-                c.prepareExpression(session);
+                c.prepareExpressions(session);
             }
             for (Sequence sequence : sequences) {
                 table.addSequence(sequence);
@@ -126,7 +138,7 @@ public class CreateTable extends CommandWithColumns {
                 boolean old = session.isUndoLogEnabled();
                 try {
                     session.setUndoLogEnabled(false);
-                    session.startStatementWithinTransaction();
+                    session.startStatementWithinTransaction(null);
                     Insert insert = new Insert(session);
                     insert.setSortedInsertMode(sortedInsertMode);
                     insert.setQuery(asQuery);
@@ -135,6 +147,7 @@ public class CreateTable extends CommandWithColumns {
                     insert.prepare();
                     insert.update();
                 } finally {
+                    session.endStatement();
                     session.setUndoLogEnabled(old);
                 }
             }
@@ -177,42 +190,9 @@ public class CreateTable extends CommandWithColumns {
     private void generateColumnsFromQuery() {
         int columnCount = asQuery.getColumnCount();
         ArrayList<Expression> expressions = asQuery.getExpressions();
-        ColumnNamer columnNamer= new ColumnNamer(session);
         for (int i = 0; i < columnCount; i++) {
             Expression expr = expressions.get(i);
-            int type = expr.getType();
-            String name = columnNamer.getColumnName(expr,i,expr.getAlias());
-            long precision = expr.getPrecision();
-            int displaySize = expr.getDisplaySize();
-            DataType dt = DataType.getDataType(type);
-            if (precision > 0 && (dt.defaultPrecision == 0 ||
-                    (dt.defaultPrecision > precision && dt.defaultPrecision < Byte.MAX_VALUE))) {
-                // dont' set precision to MAX_VALUE if this is the default
-                precision = dt.defaultPrecision;
-            }
-            int scale = expr.getScale();
-            if (scale > 0 && (dt.defaultScale == 0 ||
-                    (dt.defaultScale > scale && dt.defaultScale < precision))) {
-                scale = dt.defaultScale;
-            }
-            if (scale > precision) {
-                precision = scale;
-            }
-            ExtTypeInfo extTypeInfo = null;
-            int t = dt.type;
-            if (DataType.isExtInfoType(t)) {
-                if (expr instanceof ExpressionColumn) {
-                    extTypeInfo = ((ExpressionColumn) expr).getColumn().getExtTypeInfo();
-                } else if (t == Value.ENUM) {
-                    /*
-                     * Only columns of tables may be enumerated.
-                     */
-                    throw DbException.get(ErrorCode.GENERAL_ERROR_1,
-                            "Unable to resolve enumerators of expression");
-                }
-            }
-            Column col = new Column(name, type, precision, scale, displaySize, extTypeInfo);
-            addColumn(col);
+            addColumn(new Column(expr.getColumnNameForView(session, i), expr.getType()));
         }
     }
 

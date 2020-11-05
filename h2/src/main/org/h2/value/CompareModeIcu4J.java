@@ -1,11 +1,12 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
 
 import java.lang.reflect.Method;
+import java.text.Collator;
 import java.util.Comparator;
 import java.util.Locale;
 
@@ -20,16 +21,21 @@ public class CompareModeIcu4J extends CompareMode {
 
     private final Comparator<String> collator;
 
-    protected CompareModeIcu4J(String name, int strength, boolean binaryUnsigned) {
-        super(name, strength, binaryUnsigned);
+    private volatile CompareModeIcu4J caseInsensitive;
+
+    protected CompareModeIcu4J(String name, int strength) {
+        super(name, strength);
         collator = getIcu4jCollator(name, strength);
     }
 
     @Override
     public int compareString(String a, String b, boolean ignoreCase) {
-        if (ignoreCase) {
-            a = a.toUpperCase();
-            b = b.toUpperCase();
+        if (ignoreCase && getStrength() > Collator.SECONDARY) {
+            CompareModeIcu4J i = caseInsensitive;
+            if (i == null) {
+                caseInsensitive = i = new CompareModeIcu4J(getName(), Collator.SECONDARY);
+            }
+            return i.compareString(a, b, false);
         }
         return collator.compare(a, b);
     }
@@ -49,12 +55,13 @@ public class CompareModeIcu4J extends CompareMode {
                     "com.ibm.icu.text.Collator");
             Method getInstanceMethod = collatorClass.getMethod(
                     "getInstance", Locale.class);
-            if (name.length() == 2) {
+            int length = name.length();
+            if (length == 2) {
                 Locale locale = new Locale(StringUtils.toLowerEnglish(name), "");
                 if (compareLocaleNames(locale, name)) {
                     result = (Comparator<String>) getInstanceMethod.invoke(null, locale);
                 }
-            } else if (name.length() == 5) {
+            } else if (length == 5) {
                 // LL_CC (language_country)
                 int idx = name.indexOf('_');
                 if (idx >= 0) {

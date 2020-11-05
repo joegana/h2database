@@ -1,13 +1,14 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.result;
 
-import org.h2.engine.SessionInterface;
+import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
 import org.h2.message.DbException;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 
 /**
@@ -15,21 +16,19 @@ import org.h2.value.Value;
  *
  * @author Sergi Vladykin
  */
-public abstract class LazyResult implements ResultInterface {
+public abstract class LazyResult extends FetchedResult {
 
+    private final SessionLocal session;
     private final Expression[] expressions;
-    private int rowId = -1;
-    private Value[] currentRow;
-    private Value[] nextRow;
     private boolean closed;
-    private boolean afterLast;
-    private int limit;
+    private long limit;
 
-    public LazyResult(Expression[] expressions) {
+    public LazyResult(SessionLocal session, Expression[] expressions) {
+        this.session = session;
         this.expressions = expressions;
     }
 
-    public void setLimit(int limit) {
+    public void setLimit(long limit) {
         this.limit = limit;
     }
 
@@ -41,32 +40,32 @@ public abstract class LazyResult implements ResultInterface {
     @Override
     public void reset() {
         if (closed) {
-            throw DbException.throwInternalError();
+            throw DbException.getInternalError();
         }
-        rowId = -1;
+        rowId = -1L;
         afterLast = false;
         currentRow = null;
         nextRow = null;
     }
 
-    @Override
-    public Value[] currentRow() {
-        return currentRow;
-    }
-
-    @Override
-    public boolean next() {
-        if (hasNext()) {
-            rowId++;
-            currentRow = nextRow;
+    /**
+     * Go to the next row and skip it.
+     *
+     * @return true if a row exists
+     */
+    public boolean skip() {
+        if (closed || afterLast) {
+            return false;
+        }
+        currentRow = null;
+        if (nextRow != null) {
             nextRow = null;
             return true;
         }
-        if (!afterLast) {
-            rowId++;
-            currentRow = null;
-            afterLast = true;
+        if (skipNextRow()) {
+            return true;
         }
+        afterLast = true;
         return false;
     }
 
@@ -88,24 +87,18 @@ public abstract class LazyResult implements ResultInterface {
      */
     protected abstract Value[] fetchNextRow();
 
-    @Override
-    public boolean isAfterLast() {
-        return afterLast;
+    /**
+     * Skip next row.
+     *
+     * @return true if next row was available
+     */
+    protected boolean skipNextRow() {
+        return fetchNextRow() != null;
     }
 
     @Override
-    public int getRowId() {
-        return rowId;
-    }
-
-    @Override
-    public int getRowCount() {
+    public long getRowCount() {
         throw DbException.getUnsupportedException("Row count is unknown for lazy result.");
-    }
-
-    @Override
-    public boolean needToClose() {
-        return true;
     }
 
     @Override
@@ -120,7 +113,7 @@ public abstract class LazyResult implements ResultInterface {
 
     @Override
     public String getAlias(int i) {
-        return expressions[i].getAlias();
+        return expressions[i].getAlias(session, i);
     }
 
     @Override
@@ -135,27 +128,12 @@ public abstract class LazyResult implements ResultInterface {
 
     @Override
     public String getColumnName(int i) {
-        return expressions[i].getColumnName();
+        return expressions[i].getColumnName(session, i);
     }
 
     @Override
-    public int getColumnType(int i) {
+    public TypeInfo getColumnType(int i) {
         return expressions[i].getType();
-    }
-
-    @Override
-    public long getColumnPrecision(int i) {
-        return expressions[i].getPrecision();
-    }
-
-    @Override
-    public int getColumnScale(int i) {
-        return expressions[i].getScale();
-    }
-
-    @Override
-    public int getDisplaySize(int i) {
-        return expressions[i].getDisplaySize();
     }
 
     @Override
@@ -179,17 +157,4 @@ public abstract class LazyResult implements ResultInterface {
         return 1;
     }
 
-    @Override
-    public ResultInterface createShallowCopy(SessionInterface targetSession) {
-        // Copying is impossible with lazy result.
-        return null;
-    }
-
-    @Override
-    public boolean containsDistinct(Value[] values) {
-        // We have to make sure that we do not allow lazy
-        // evaluation when this call is needed:
-        // WHERE x IN (SELECT ...).
-        throw DbException.throwInternalError();
-    }
 }

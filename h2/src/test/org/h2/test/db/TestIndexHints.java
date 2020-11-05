@@ -1,18 +1,18 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.db;
-
-import org.h2.api.ErrorCode;
-import org.h2.test.TestBase;
-import org.h2.test.TestDb;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+
+import org.h2.api.ErrorCode;
+import org.h2.test.TestBase;
+import org.h2.test.TestDb;
 
 /**
  * Tests the index hints feature of this database.
@@ -27,7 +27,7 @@ public class TestIndexHints extends TestDb {
      * @param a ignored
      */
     public static void main(String... a) throws Exception {
-        TestBase.createCaller().init().test();
+        TestBase.createCaller().init().testFromMain();
     }
 
     @Override
@@ -62,12 +62,12 @@ public class TestIndexHints extends TestDb {
         assertTrue(rs.next());
         String plan = rs.getString(1);
         rs.close();
-        assertTrue(plan.contains("/* PUBLIC.\"Idx3\":"));
+        assertTrue(plan.contains("/* PUBLIC.Idx3:"));
         assertTrue(plan.contains("USE INDEX (\"Idx3\")"));
         rs = stat.executeQuery("EXPLAIN ANALYZE " + plan);
         assertTrue(rs.next());
         plan = rs.getString(1);
-        assertTrue(plan.contains("/* PUBLIC.\"Idx3\":"));
+        assertTrue(plan.contains("/* PUBLIC.Idx3:"));
         assertTrue(plan.contains("USE INDEX (\"Idx3\")"));
     }
 
@@ -110,12 +110,12 @@ public class TestIndexHints extends TestDb {
         ResultSet rs = conn.createStatement().executeQuery("explain analyze select * " +
                 "from test use index(idx1, idx2) where x=1 and y=1");
         rs.next();
-        assertTrue(rs.getString(1).contains("USE INDEX (IDX1, IDX2)"));
+        assertTrue(rs.getString(1).contains("USE INDEX (\"IDX1\", \"IDX2\")"));
 
         ResultSet rs2 = conn.createStatement().executeQuery("explain analyze select * " +
                 "from test use index(idx2, idx1) where x=1 and y=1");
         rs2.next();
-        assertTrue(rs2.getString(1).contains("USE INDEX (IDX2, IDX1)"));
+        assertTrue(rs2.getString(1).contains("USE INDEX (\"IDX2\", \"IDX1\")"));
     }
 
     private void testWithEmptyIndexHintsList() throws SQLException {

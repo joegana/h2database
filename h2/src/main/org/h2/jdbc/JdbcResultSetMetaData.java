@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.jdbc;
@@ -13,12 +13,12 @@ import org.h2.message.TraceObject;
 import org.h2.result.ResultInterface;
 import org.h2.util.MathUtils;
 import org.h2.value.DataType;
+import org.h2.value.ValueToObjectConverter;
 
 /**
  * Represents the meta data for a ResultSet.
  */
-public class JdbcResultSetMetaData extends TraceObject implements
-        ResultSetMetaData {
+public final class JdbcResultSetMetaData extends TraceObject implements ResultSetMetaData {
 
     private final String catalog;
     private final JdbcResultSet rs;
@@ -102,8 +102,7 @@ public class JdbcResultSetMetaData extends TraceObject implements
         try {
             debugCodeCall("getColumnType", column);
             checkColumnIndex(column);
-            int type = result.getColumnType(--column);
-            return DataType.convertTypeToSQLType(type);
+            return DataType.convertTypeToSQLType(result.getColumnType(--column));
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -121,8 +120,7 @@ public class JdbcResultSetMetaData extends TraceObject implements
         try {
             debugCodeCall("getColumnTypeName", column);
             checkColumnIndex(column);
-            int type = result.getColumnType(--column);
-            return DataType.getDataType(type).name;
+            return result.getColumnType(--column).getDeclaredTypeName();
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -283,10 +281,10 @@ public class JdbcResultSetMetaData extends TraceObject implements
 
     /**
      * Checks if this column is signed.
-     * It always returns true.
+     * Returns true for numeric columns.
      *
      * @param column the column index (1,2,...)
-     * @return true
+     * @return true for numeric columns
      * @throws SQLException if the result set is closed or invalid
      */
     @Override
@@ -294,7 +292,7 @@ public class JdbcResultSetMetaData extends TraceObject implements
         try {
             debugCodeCall("isSigned", column);
             checkColumnIndex(column);
-            return true;
+            return DataType.isNumericType(result.getColumnType(--column).getValueType());
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -370,8 +368,8 @@ public class JdbcResultSetMetaData extends TraceObject implements
         try {
             debugCodeCall("getColumnClassName", column);
             checkColumnIndex(column);
-            int type = result.getColumnType(--column);
-            return DataType.getTypeClassName(type, true);
+            int type = result.getColumnType(--column).getValueType();
+            return ValueToObjectConverter.getDefaultClass(type, true).getName();
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -389,7 +387,7 @@ public class JdbcResultSetMetaData extends TraceObject implements
         try {
             debugCodeCall("getPrecision", column);
             checkColumnIndex(column);
-            long prec = result.getColumnPrecision(--column);
+            long prec = result.getColumnType(--column).getPrecision();
             return MathUtils.convertLongToInt(prec);
         } catch (Exception e) {
             throw logAndConvert(e);
@@ -408,7 +406,7 @@ public class JdbcResultSetMetaData extends TraceObject implements
         try {
             debugCodeCall("getScale", column);
             checkColumnIndex(column);
-            return result.getColumnScale(--column);
+            return result.getColumnType(--column).getScale();
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -426,7 +424,7 @@ public class JdbcResultSetMetaData extends TraceObject implements
         try {
             debugCodeCall("getColumnDisplaySize", column);
             checkColumnIndex(column);
-            return result.getDisplaySize(--column);
+            return result.getColumnType(--column).getDisplaySize();
         } catch (Exception e) {
             throw logAndConvert(e);
         }

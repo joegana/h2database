@@ -1,15 +1,14 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.index;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 
-import org.h2.engine.Session;
-import org.h2.expression.Comparison;
+import org.h2.engine.SessionLocal;
+import org.h2.expression.condition.Comparison;
 import org.h2.message.DbException;
 import org.h2.result.ResultInterface;
 import org.h2.result.Row;
@@ -18,7 +17,6 @@ import org.h2.result.SortOrder;
 import org.h2.table.Column;
 import org.h2.table.IndexColumn;
 import org.h2.table.Table;
-import org.h2.table.TableFilter;
 import org.h2.value.Value;
 import org.h2.value.ValueGeometry;
 import org.h2.value.ValueNull;
@@ -33,8 +31,7 @@ import org.h2.value.ValueNull;
  */
 public class IndexCursor implements Cursor {
 
-    private Session session;
-    private final TableFilter tableFilter;
+    private SessionLocal session;
     private Index index;
     private Table table;
     private IndexColumn[] indexColumns;
@@ -46,10 +43,8 @@ public class IndexCursor implements Cursor {
     private int inListIndex;
     private Value[] inList;
     private ResultInterface inResult;
-    private HashSet<Value> inResultTested;
 
-    public IndexCursor(TableFilter filter) {
-        this.tableFilter = filter;
+    public IndexCursor() {
     }
 
     public void setIndex(Index index) {
@@ -74,14 +69,13 @@ public class IndexCursor implements Cursor {
      * @param s Session.
      * @param indexConditions Index conditions.
      */
-    public void prepare(Session s, ArrayList<IndexCondition> indexConditions) {
-        this.session = s;
+    public void prepare(SessionLocal s, ArrayList<IndexCondition> indexConditions) {
+        session = s;
         alwaysFalse = false;
         start = end = null;
         inList = null;
         inColumn = null;
         inResult = null;
-        inResultTested = null;
         intersects = null;
         for (IndexCondition condition : indexConditions) {
             if (condition.isAlwaysFalse()) {
@@ -142,14 +136,6 @@ public class IndexCursor implements Cursor {
                     inList = null;
                     inResult = null;
                 }
-                if (!session.getDatabase().getSettings().optimizeIsNull) {
-                    if (isStart && isEnd) {
-                        if (v == ValueNull.INSTANCE) {
-                            // join on a column=NULL is always false
-                            alwaysFalse = true;
-                        }
-                    }
-                }
             }
         }
         if (inColumn != null) {
@@ -163,17 +149,16 @@ public class IndexCursor implements Cursor {
      * @param s the session
      * @param indexConditions the index conditions
      */
-    public void find(Session s, ArrayList<IndexCondition> indexConditions) {
+    public void find(SessionLocal s, ArrayList<IndexCondition> indexConditions) {
         prepare(s, indexConditions);
         if (inColumn != null) {
             return;
         }
         if (!alwaysFalse) {
             if (intersects != null && index instanceof SpatialIndex) {
-                cursor = ((SpatialIndex) index).findByGeometry(tableFilter,
-                        start, end, intersects);
-            } else {
-                cursor = index.find(tableFilter, start, end);
+                cursor = ((SpatialIndex) index).findByGeometry(session, start, end, intersects);
+            } else if (index != null) {
+                cursor = index.find(session, start, end);
             }
         }
     }
@@ -204,12 +189,10 @@ public class IndexCursor implements Cursor {
             row = table.getTemplateRow();
         } else if (row.getValue(columnId) != null) {
             // if an object needs to overlap with both a and b,
-            // then it needs to overlap with the the union of a and b
+            // then it needs to overlap with the union of a and b
             // (not the intersection)
-            ValueGeometry vg = (ValueGeometry) row.getValue(columnId).
-                    convertTo(Value.GEOMETRY);
-            v = ((ValueGeometry) v.convertTo(Value.GEOMETRY)).
-                    getEnvelopeUnion(vg);
+            ValueGeometry vg = row.getValue(columnId).convertToGeometry(null);
+            v = v.convertToGeometry(null).getEnvelopeUnion(vg);
         }
         if (columnId == SearchRow.ROWID_INDEX) {
             row.setKey(v.getLong());
@@ -239,23 +222,15 @@ public class IndexCursor implements Cursor {
         } else if (b == null) {
             return a;
         }
-        if (session.getDatabase().getSettings().optimizeIsNull) {
-            // IS NULL must be checked later
-            if (a == ValueNull.INSTANCE) {
-                return b;
-            } else if (b == ValueNull.INSTANCE) {
-                return a;
-            }
-        }
-        int comp = table.getDatabase().compare(a, b);
-        if (comp == 0) {
+        // IS NULL must be checked later
+        if (a == ValueNull.INSTANCE) {
+            return b;
+        } else if (b == ValueNull.INSTANCE) {
             return a;
         }
-        if (a == ValueNull.INSTANCE || b == ValueNull.INSTANCE) {
-            if (session.getDatabase().getSettings().optimizeIsNull) {
-                // column IS NULL AND column <op> <not null> is always false
-                return null;
-            }
+        int comp = session.compare(a, b);
+        if (comp == 0) {
+            return a;
         }
         return (comp > 0) == bigger ? a : b;
     }
@@ -329,28 +304,23 @@ public class IndexCursor implements Cursor {
             while (inResult.next()) {
                 Value v = inResult.currentRow()[0];
                 if (v != ValueNull.INSTANCE) {
-                    if (inResultTested == null) {
-                        inResultTested = new HashSet<>();
-                    }
-                    if (inResultTested.add(v)) {
-                        find(v);
-                        break;
-                    }
+                    find(v);
+                    break;
                 }
             }
         }
     }
 
     private void find(Value v) {
-        v = inColumn.convert(v);
+        v = inColumn.convert(session, v);
         int id = inColumn.getColumnId();
         start.setValue(id, v);
-        cursor = index.find(tableFilter, start, start);
+        cursor = index.find(session, start, start);
     }
 
     @Override
     public boolean previous() {
-        throw DbException.throwInternalError(toString());
+        throw DbException.getInternalError(toString());
     }
 
 }

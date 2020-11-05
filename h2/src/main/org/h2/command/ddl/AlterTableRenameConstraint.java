@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2018 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.ddl;
@@ -9,7 +9,7 @@ import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.constraint.Constraint;
 import org.h2.engine.Right;
-import org.h2.engine.Session;
+import org.h2.engine.SessionLocal;
 import org.h2.message.DbException;
 import org.h2.schema.Schema;
 
@@ -22,7 +22,7 @@ public class AlterTableRenameConstraint extends SchemaCommand {
     private String constraintName;
     private String newConstraintName;
 
-    public AlterTableRenameConstraint(Session session, Schema schema) {
+    public AlterTableRenameConstraint(SessionLocal session, Schema schema) {
         super(session, schema);
     }
 
@@ -34,7 +34,7 @@ public class AlterTableRenameConstraint extends SchemaCommand {
     }
 
     @Override
-    public int update() {
+    public long update() {
         session.commit(true);
         Constraint constraint = getSchema().findConstraint(session, constraintName);
         if (constraint == null) {
@@ -45,8 +45,8 @@ public class AlterTableRenameConstraint extends SchemaCommand {
             throw DbException.get(ErrorCode.CONSTRAINT_ALREADY_EXISTS_1,
                     newConstraintName);
         }
-        session.getUser().checkRight(constraint.getTable(), Right.ALL);
-        session.getUser().checkRight(constraint.getRefTable(), Right.ALL);
+        session.getUser().checkTableRight(constraint.getTable(), Right.SCHEMA_OWNER);
+        session.getUser().checkTableRight(constraint.getRefTable(), Right.SCHEMA_OWNER);
         session.getDatabase().renameSchemaObject(session, constraint, newConstraintName);
         return 0;
     }
